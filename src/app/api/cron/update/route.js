@@ -2,11 +2,12 @@ import prisma from "@/lib/prisma"
 import { NextResponse } from "next/server"
 import * as cheerio from 'cheerio'
 
+// Paksa Vercel jalan maksimal 60 detik & selalu fresh (tidak cache)
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [START] Smart Cron Job V2 (Batching Mode)...");
+    console.log("🚀 [START] Final Cron Job (Proxy Mode)...");
     const startTime = Date.now();
 
     try {
@@ -18,32 +19,27 @@ export async function GET(request) {
             return NextResponse.json({ message: "Koleksi kosong." });
         }
 
-        // --- KONFIGURASI ANTRIAN ---
-        // Kita turunkan kecepatan biar Shinigami gak marah (Error 429)
-        const BATCH_SIZE = 2; // Cuma 2 manga per detik
-        const DELAY_MS = 2000; // Istirahat 2 detik
+        // --- KONFIGURASI BATCHING (ANTRIAN) ---
+        const BATCH_SIZE = 2; // 2 manga per detik
+        const DELAY_MS = 2000; // Istirahat 2 detik antar batch
         
         const logs = [];
         let updatesFound = 0;
 
         console.log(`⚡ Mengantre ${collections.length} manga...`);
 
-        // Loop Batching
         for (let i = 0; i < collections.length; i += BATCH_SIZE) {
             const batch = collections.slice(i, i + BATCH_SIZE);
             const batchNum = Math.floor(i/BATCH_SIZE) + 1;
             console.log(`⏳ Proses Batch ${batchNum}...`);
 
-            // Jalankan batch
             const results = await Promise.all(batch.map(manga => checkSingleManga(manga)));
             
-            // Simpan log
             results.forEach(res => {
                 if (res) logs.push(res);
                 if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            // Istirahat (kecuali batch terakhir)
             if (i + BATCH_SIZE < collections.length) {
                 await new Promise(r => setTimeout(r, DELAY_MS));
             }
@@ -64,14 +60,12 @@ export async function GET(request) {
     }
 }
 
-// --- GANTI FUNGSI checkSingleManga DENGAN INI ---
-
 async function checkSingleManga(manga) {
     if (!manga.user?.webhookUrl) return null; 
 
-    const isShinigami = manga.mangaId.length > 30; 
+    const isShinigami = manga.mangaId.length > 30;
     
-    // Header Android (Paling ampuh tembus blokir)
+    // Header Android untuk menyamar jadi HP
     const headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
         "Referer": "https://google.com",
@@ -83,18 +77,30 @@ async function checkSingleManga(manga) {
         if (isShinigami) {
             // --- LOGIC SHINIGAMI (API) ---
             const apiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
-            // Gunakan fetchWithRetry untuk handle 429 & 500
+            
+            // Fetch pakai retry & proxy otomatis
             const res = await fetchWithRetry(apiUrl, { headers });
             
-            const json = await res.json();
-            if (json.data?.latest_chapter_number) {
-                chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
-            } else {
-                return `⚠️ SKIP [${manga.title}]: Data API kosong`;
+            // SAFE PARSING: Cek dulu apakah isinya JSON beneran?
+            // Ini untuk mengatasi error "Unexpected token <"
+            try {
+                const text = await res.text(); // Ambil teks mentah dulu
+                if (text.trim().startsWith("<")) {
+                    throw new Error("API merespon HTML (Error/Block Page)");
+                }
+                const json = JSON.parse(text); // Baru di-parse manual
+                
+                if (json.data?.latest_chapter_number) {
+                    chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
+                } else {
+                    return `⚠️ SKIP [${manga.title}]: Data API tidak lengkap`;
+                }
+            } catch (parseErr) {
+                return `⚠️ SKIP [${manga.title}]: Gagal Parse JSON (${parseErr.message})`;
             }
 
         } else {
-            // --- LOGIC KOMIKINDO (SCRAPING) + AUTO PROXY ---
+            // --- LOGIC KOMIKINDO (WEB SCRAPING) ---
             const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
             
             // 1. Coba Tembak Langsung
@@ -102,8 +108,9 @@ async function checkSingleManga(manga) {
 
             // 2. Kalau DIBLOKIR (403), Aktifkan Mode Proxy Otomatis!
             if (res.status === 403) {
+                // Log ini HARUS MUNCUL kalau kode berhasil terupdate
                 console.log(`   🛡️ [${manga.title}] Kena 403. Mencoba lewat Proxy...`);
-                // Kita bungkus URL-nya pakai corsproxy.io
+                
                 const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
                 res = await fetch(proxyUrl, { headers, cache: 'no-store' });
             }
@@ -119,7 +126,7 @@ async function checkSingleManga(manga) {
             if (rawText) {
                 chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
             } else {
-                return `⚠️ SKIP [${manga.title}]: Gagal parsing HTML (Struktur web berubah?)`;
+                return `⚠️ SKIP [${manga.title}]: Gagal parsing HTML`;
             }
         }
 
@@ -144,39 +151,24 @@ async function checkSingleManga(manga) {
         return null; 
 
     } catch (err) {
-        // Cek error fetch biar log gak kepanjangan
         return `❌ ERROR [${manga.title}]: ${err.message}`;
     }
 }
 
-// Fungsi Fetch Anti-429 (Tunggu kalau disuruh tunggu)
-// GANTI FUNGSI INI SAJA (Adanya di bagian bawah file)
-
-async function fetchWithRetry(url, options, retries = 2) {
+// Fungsi Fetch Pintar (Retry + Auto Proxy untuk API)
+async function fetchWithRetry(url, options, retries = 1) {
     try {
-        // Usaha 1: Tembak Langsung (Direct)
         const res = await fetch(url, { ...options, next: { revalidate: 0 } });
         
-        // Kalau kena blokir (403) atau error server (502/429), kita coba pakai Joki (Proxy)
-        if ((res.status === 403 || res.status === 502 || res.status === 429) && retries > 0) {
-            console.log(`   🛡️ Kena ${res.status}. Mengaktifkan Mode Proxy untuk: ${url}`);
-            
-            // Tunggu 2 detik dulu biar gak mencurigakan
+        // Kalau error 502/429/403, coba pakai Proxy
+        if ((res.status === 502 || res.status === 429 || res.status === 403) && retries > 0) {
             await new Promise(r => setTimeout(r, 2000));
-
-            // --- PILIHAN PROXY GRATIS ---
-            // Kita bungkus URL aslinya supaya request berasal dari server Proxy, bukan Vercel
             const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-            
-            // Coba lagi lewat jalur proxy
             return fetchWithRetry(proxyUrl, options, retries - 1);
         }
         
-        if (!res.ok) throw new Error(`Status ${res.status}`);
         return res;
-
     } catch (e) {
-        // Kalau masih error juga, coba retry terakhir (kalau sisa retry masih ada)
         if (retries > 0) {
             await new Promise(r => setTimeout(r, 2000));
             return fetchWithRetry(url, options, retries - 1);
