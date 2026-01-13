@@ -6,7 +6,7 @@ export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [START] Smart Cron Job dimulai...");
+    console.log("🚀 [START] Smart Cron Job V2 (Batching Mode)...");
     const startTime = Date.now();
 
     try {
@@ -18,35 +18,40 @@ export async function GET(request) {
             return NextResponse.json({ message: "Koleksi kosong." });
         }
 
-        console.log(`⚡ Total antrian: ${collections.length} manga.`);
-
-        // --- TEKNIK BATCHING (CICIL 3 MANGA PER REQUEST) ---
-        // Ini solusi untuk Error 429 (Too Many Requests)
-        const BATCH_SIZE = 3; 
+        // --- KONFIGURASI ANTRIAN ---
+        // Kita turunkan kecepatan biar Shinigami gak marah (Error 429)
+        const BATCH_SIZE = 2; // Cuma 2 manga per detik
+        const DELAY_MS = 2000; // Istirahat 2 detik
+        
         const logs = [];
         let updatesFound = 0;
 
-        // Bagi koleksi menjadi kelompok-kelompok kecil
+        console.log(`⚡ Mengantre ${collections.length} manga...`);
+
+        // Loop Batching
         for (let i = 0; i < collections.length; i += BATCH_SIZE) {
             const batch = collections.slice(i, i + BATCH_SIZE);
-            console.log(`🔄 Memproses Batch ${Math.floor(i/BATCH_SIZE) + 1} (${batch.length} item)...`);
+            const batchNum = Math.floor(i/BATCH_SIZE) + 1;
+            console.log(`⏳ Proses Batch ${batchNum}...`);
 
-            // Jalankan batch ini secara parallel
+            // Jalankan batch
             const results = await Promise.all(batch.map(manga => checkSingleManga(manga)));
             
-            // Simpan hasil
+            // Simpan log
             results.forEach(res => {
                 if (res) logs.push(res);
-                if (res && res.includes("UPDATE")) updatesFound++;
+                if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            // Istirahat 1.5 detik sebelum batch berikutnya (Supaya server tidak marah)
+            // Istirahat (kecuali batch terakhir)
             if (i + BATCH_SIZE < collections.length) {
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                await new Promise(r => setTimeout(r, DELAY_MS));
             }
         }
 
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`🏁 Selesai dalam ${duration} detik.`);
+
         return NextResponse.json({ 
             status: "Selesai", 
             duration: `${duration}s`, 
@@ -55,7 +60,6 @@ export async function GET(request) {
         });
 
     } catch (error) {
-        console.error("❌ CRITICAL SYSTEM ERROR:", error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
@@ -63,90 +67,89 @@ export async function GET(request) {
 async function checkSingleManga(manga) {
     if (!manga.user?.webhookUrl) return null; 
 
-    const isShinigami = manga.mangaId.length > 30;
+    const isShinigami = manga.mangaId.length > 30; // ID Panjang biasanya Shinigami/API
     
-    // Header Android (Biasanya lebih dipercaya daripada Header Desktop)
+    // Header Mobile Android (Paling ampuh tembus blokir)
     const headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Referer": "https://google.com"
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Referer": "https://google.com",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     };
 
     try {
         let chapterBaruText = "";
 
         if (isShinigami) {
-            // API Shinigami dengan Retry Logic
-            let res = await fetchWithRetry(`https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`, { headers });
+            // --- LOGIC SHINIGAMI (API) ---
+            // Kita pakai Retry manual untuk menahan Error 429
+            const res = await fetchWithRetry(`https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`, { headers });
             
             const json = await res.json();
             if (json.data?.latest_chapter_number) {
                 chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
             } else {
-                throw new Error("Data API kosong");
+                return `⚠️ SKIP [${manga.title}]: Data API kosong`;
             }
 
         } else {
-            // Scrape KomikIndo
+            // --- LOGIC KOMIKINDO (SCRAPING) ---
             const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
             const res = await fetch(targetUrl, { headers, cache: 'no-store' });
 
-            if (res.status === 403) throw new Error("Diblokir (403). Server mendeteksi Vercel.");
-            if (!res.ok) throw new Error(`Web Error ${res.status}`);
+            if (res.status === 403) return `⛔ BLOCKED [${manga.title}]: KomikIndo tolak akses (403)`;
+            if (!res.ok) return `⚠️ SKIP [${manga.title}]: Web Error ${res.status}`;
             
             const html = await res.text();
             const $ = cheerio.load(html);
             
-            // Coba selector mobile view
             let rawText = $('#chapter_list .lchx a').first().text();
             if (!rawText) rawText = $('.chapter-list li:first-child a').text();
 
             if (rawText) {
                 chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
             } else {
-                throw new Error("HTML berubah/Gagal parsing");
+                return `⚠️ SKIP [${manga.title}]: Gagal parsing HTML`;
             }
         }
 
-        // --- LOGIC UPDATE ---
+        // --- CEK UPDATE ---
         if (manga.lastChapter !== chapterBaruText) {
-            // Double check biar gak spam notif untuk chapter yang sama
-            if (manga.lastChapter.replace(/[^0-9]/g, '') === chapterBaruText.replace(/[^0-9]/g, '')) {
-                 return null; // Angkanya sama, cuma beda format teks. Skip.
-            }
-
-            console.log(`🔥 UPDATE: ${manga.title}`);
+            // Validasi angka (biar gak update cuma gara-gara beda spasi)
+            const numOld = manga.lastChapter.replace(/[^0-9.]/g, '');
+            const numNew = chapterBaruText.replace(/[^0-9.]/g, '');
             
+            if (numOld === numNew && numOld !== "") return null; 
+
+            // Update DB
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
             });
 
+            // Kirim Notif
             await sendDiscordNotification(manga.title, chapterBaruText, manga.image, manga.user.webhookUrl);
             return `✅ UPDATE [${manga.title}]: ${chapterBaruText}`;
         }
         
-        return null;
+        return null; // Tidak ada update
 
     } catch (err) {
         return `❌ ERROR [${manga.title}]: ${err.message}`;
     }
 }
 
-// Fungsi Fetch Pintar (Kalau gagal 429, coba lagi)
-async function fetchWithRetry(url, options, retries = 1) {
+// Fungsi Fetch Anti-429 (Tunggu kalau disuruh tunggu)
+async function fetchWithRetry(url, options, retries = 2) {
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 } });
         
-        // Kalau kena Rate Limit (429), tunggu 2 detik lalu coba lagi
         if (res.status === 429 && retries > 0) {
-            console.log("   ⚠️ Kena limit 429. Tunggu 2 detik...");
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 2000)); // Tunggu 2 detik
             return fetchWithRetry(url, options, retries - 1);
         }
         
-        if (!res.ok) throw new Error(`API Error ${res.status}`);
+        if (!res.ok) throw new Error(`Status ${res.status}`);
         return res;
-
     } catch (e) {
         throw e;
     }
