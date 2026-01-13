@@ -2,174 +2,133 @@ import prisma from "@/lib/prisma"
 import { NextResponse } from "next/server"
 import * as cheerio from 'cheerio'
 
-export async function GET() {
-    const collections = await prisma.collection.findMany({
-        include: { user: true }
-    })
-    
-    if (collections.length === 0) return NextResponse.json({ message: "Koleksi kosong." })
+export const maxDuration = 60; // Paksa Vercel jalan sampai 60 detik (Pro feature, tapi kadang ngefek di Hobby)
+export const dynamic = 'force-dynamic';
 
-    console.log(`\n🔍 Memulai Pengecekan untuk ${collections.length} komik...`);
-    
-    let updatesFound = 0
-    let reportLog = []
+export async function GET(request) {
+    // 1. Cek Token Rahasia (Opsional, hapus if ini kalau mau tes manual tanpa header dulu)
+    const authHeader = request.headers.get('authorization');
+    if (process.env.CRON_SECRET && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+        // return NextResponse.json({ message: 'Unauthorized' }, { status: 401 });
+    }
 
-    for (const manga of collections) {
-        // Log judul yang sedang diproses biar ketahuan sampai mana
-        
-        // --- PERBAIKAN LOGIC DETEKSI DI SINI ---
-        // ID Shinigami (UUID) = 36 karakter. Slug KomikIndo rata-rata < 30.
-        // Kita set batas > 30. Jadi "rank-no-ura-soubi-musou" (23 char) akan masuk Scrape.
-        const isShinigami = manga.mangaId.length > 30; 
-        // ---------------------------------------
+    console.log("🕒 [START] Cron Job dimulai...");
 
-        console.log(`➡️ Cek: [${manga.title}] (${isShinigami ? 'API' : 'Scrape'})`);
+    try {
+        // Ambil semua koleksi + data user pemiliknya
+        const collections = await prisma.collection.findMany({
+            include: { user: true } // <--- WAJIB ADA BIAR BISA AKSES WEBHOOK
+        })
 
-        try {
-            let chapterBaruText = ""
+        if (collections.length === 0) {
+            console.log("⚠️ Koleksi kosong.");
+            return NextResponse.json({ message: "Koleksi kosong." });
+        }
 
-            // --- 1. LOGIKA SHINIGAMI (API) ---
-            if (isShinigami) {
-                const response = await fetch(`https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`, { cache: 'no-store' })
-                const json = await response.json()
-                
-                if (!json.data) {
-                    console.log(`   ⚠️ Skip: Data API kosong.`);
-                    continue;
-                }
+        console.log(`🔎 Mengecek ${collections.length} manga...`);
+        let updatesFound = 0;
+        let logs = [];
 
-                const chapterNum = json.data.latest_chapter_number;
-                if (chapterNum === undefined || chapterNum === null) {
-                    console.log(`   ⚠️ Skip: Chapter number tidak ada.`);
-                    continue;
-                }
-                chapterBaruText = `Chapter ${chapterNum}`;
+        // Loop satu per satu
+        for (const manga of collections) {
+            const startTime = Date.now();
+            console.log(`\n➡️ Sedang cek: [${manga.title}] milik ${manga.user.email}`);
             
-            // --- 2. LOGIKA KOMIKINDO (SCRAPING) ---
+            // Cek apakah user punya webhook?
+            if (!manga.user.webhookUrl) {
+                console.log("   ❌ User ini TIDAK punya Webhook. Skip notif jika update.");
             } else {
-                const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
-                
-                const response = await fetch(targetUrl, {
-                    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" },
-                    cache: 'no-store'
-                });
-
-                if (!response.ok) {
-                    console.log(`   ⚠️ Skip: Gagal akses website (Status: ${response.status})`);
-                    continue;
-                }
-
-                const html = await response.text();
-                const $ = cheerio.load(html);
-                
-                // Coba ambil text
-                const rawText = $('#chapter_list .lchx a').first().text(); 
-                
-                if (!rawText) {
-                    console.log(`   ⚠️ Skip: Gagal Scrape (Selector tidak ketemu/HTML berubah).`);
-                    if (html.includes("Just a moment")) console.log("   ⛔ Kena Cloudflare Challenge!");
-                    continue;
-                }
-                
-                chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
+                console.log(`   ✅ User punya Webhook: ${manga.user.webhookUrl.substring(0, 20)}...`);
             }
 
-            // --- 3. BANDINGKAN ---
-            if (chapterBaruText && manga.lastChapter !== chapterBaruText) {
-                updatesFound++
-                
-                await prisma.collection.update({
-                    where: { id: manga.id },
-                    data: { lastChapter: chapterBaruText }
-                })
+            try {
+                let chapterBaruText = "";
+                const isShinigami = manga.mangaId.length > 30;
 
-                const userWebhook = manga.user.webhookUrl;
-                console.log(`   🚨 UPDATE! DB: ${manga.lastChapter} -> Baru: ${chapterBaruText}`);
-
-                if (userWebhook) {
-                    await sendDiscordNotification(manga.title, chapterBaruText, manga.image, userWebhook)
-                    console.log(`   ✅ Notif sent to ${manga.user.email}`);
-                    reportLog.push(`${manga.title}: Notif sent`);
+                // --- LOGIKA FETCHING ---
+                if (isShinigami) {
+                    // API Shinigami
+                    const res = await fetch(`https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`, { next: { revalidate: 0 } });
+                    const json = await res.json();
+                    if (json.data && json.data.latest_chapter_number) {
+                        chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
+                    }
                 } else {
-                    console.log(`   ❌ No webhook for ${manga.user.email}`);
-                    reportLog.push(`${manga.title}: Updated (No Webhook)`);
+                    // Scrape KomikIndo
+                    const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
+                    const res = await fetch(targetUrl, {
+                        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" },
+                        cache: 'no-store'
+                    });
+                    if (res.ok) {
+                        const html = await res.text();
+                        const $ = cheerio.load(html);
+                        const rawText = $('#chapter_list .lchx a').first().text();
+                        if (rawText) chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
+                    }
                 }
 
+                // --- BANDINGKAN DATA ---
+                console.log(`   📊 DB: "${manga.lastChapter}" vs WEB: "${chapterBaruText}"`);
+
+                if (chapterBaruText && manga.lastChapter !== chapterBaruText) {
+                    console.log("   🔥 UPDATE TERDETEKSI!");
+                    updatesFound++;
+                    logs.push(`${manga.title}: Update!`);
+
+                    // 1. Update DB
+                    await prisma.collection.update({
+                        where: { id: manga.id },
+                        data: { lastChapter: chapterBaruText }
+                    });
+
+                    // 2. Kirim Notif (JIKA ADA WEBHOOK)
+                    if (manga.user.webhookUrl) {
+                        console.log("   🚀 Mengirim notifikasi ke Discord...");
+                        await sendDiscordNotification(manga.title, chapterBaruText, manga.image, manga.user.webhookUrl);
+                        console.log("   ✅ Notifikasi TERKIRIM (Harusnya).");
+                    }
+
+                } else {
+                    console.log("   💤 Tidak ada update.");
+                }
+
+            } catch (err) {
+                console.error(`   ❌ Error cek manga ini: ${err.message}`);
             }
-
-        } catch (error) {
-            console.error(`   ❌ Error Fatal pada ${manga.title}:`, error.message)
-        }
-    }
-
-    console.log(`\n🏁 Selesai. Total Update: ${updatesFound}\n`);
-
-    return NextResponse.json({ 
-        status: 200, 
-        message: `Selesai! ${updatesFound} update.`,
-        details: reportLog
-    })
-}
-
-// ... FUNGSI DISCORD DI BAWAH TETAP SAMA ...
-async function sendDiscordNotification(title, chapter, image, webhookUrl) {
-    if (!webhookUrl) return 
-    const message = {
-        username: "Manga Bot 🤖",
-        embeds: [{
-            title: "🔥 UPDATE BARU!",
-            description: `Manga **${title}** update!`,
-            color: 5763719,
-            fields: [
-                { name: "Chapter", value: chapter, inline: true },
-                { name: "Link", value: "Cek Website", inline: true }
-            ],
-            thumbnail: { url: image },
-            footer: { text: "Manga Reader Personal" }
-        }]
-    }
-    try {
-        await fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(message)
-        })
-    } catch (e) { console.error("Gagal kirim discord:", e) }
-}
-
-// ... (Kode POST dan GET yang lama biarkan saja di atas) ...
-
-export async function DELETE(request) {
-    const session = await getServerSession(authOptions)
-    if (!session || !session.user?.email) {
-        return NextResponse.json({ message: "Unauthorized" }, { status: 401 })
-    }
-
-    // Ambil mangaId dari URL (contoh: /api/collection?mangaId=123)
-    const { searchParams } = new URL(request.url)
-    const mangaId = searchParams.get('mangaId')
-
-    if (!mangaId) {
-        return NextResponse.json({ message: "Manga ID wajib ada" }, { status: 400 })
-    }
-
-    try {
-        // Hapus data yang cocok mangaId-nya DAN milik user yang sedang login
-        const deleted = await prisma.collection.deleteMany({
-            where: {
-                mangaId: mangaId,
-                user: { email: session.user.email } // Kunci keamanan: Cuma bisa hapus punya sendiri
-            }
-        })
-
-        if (deleted.count === 0) {
-            return NextResponse.json({ message: "Data tidak ditemukan atau bukan milikmu" }, { status: 404 })
         }
 
-        return NextResponse.json({ message: "Berhasil dihapus dari favorit" }, { status: 200 })
+        console.log(`🏁 [FINISH] Selesai. Total update: ${updatesFound}`);
+        return NextResponse.json({ status: "Selesai", logs });
 
     } catch (error) {
-        console.error("Gagal hapus:", error)
-        return NextResponse.json({ message: "Server Error" }, { status: 500 })
+        console.error("❌ CRITICAL ERROR:", error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+// Fungsi Kirim Discord
+async function sendDiscordNotification(title, chapter, image, webhookUrl) {
+    const payload = {
+        username: "Manga Bot 🤖",
+        content: `Woohoo! **${title}** baru saja update!`, // Tambah content text biar muncul notif pop-up
+        embeds: [{
+            title: title,
+            description: `Chapter baru: **${chapter}** sudah rilis!`,
+            color: 5763719,
+            image: { url: image },
+            footer: { text: "Cek aplikasi sekarang!" }
+        }]
+    };
+
+    try {
+        const res = await fetch(webhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) console.log("   ⚠️ Gagal fetch discord:", res.status, await res.text());
+    } catch (e) {
+        console.error("   ⚠️ Error network discord:", e);
     }
 }
