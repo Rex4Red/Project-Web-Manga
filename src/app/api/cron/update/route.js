@@ -139,18 +139,37 @@ async function checkSingleManga(manga) {
 }
 
 // Fungsi Fetch Anti-429 (Tunggu kalau disuruh tunggu)
+// GANTI FUNGSI INI SAJA (Adanya di bagian bawah file)
+
 async function fetchWithRetry(url, options, retries = 2) {
     try {
+        // Usaha 1: Tembak Langsung (Direct)
         const res = await fetch(url, { ...options, next: { revalidate: 0 } });
         
-        if (res.status === 429 && retries > 0) {
-            await new Promise(r => setTimeout(r, 2000)); // Tunggu 2 detik
-            return fetchWithRetry(url, options, retries - 1);
+        // Kalau kena blokir (403) atau error server (502/429), kita coba pakai Joki (Proxy)
+        if ((res.status === 403 || res.status === 502 || res.status === 429) && retries > 0) {
+            console.log(`   🛡️ Kena ${res.status}. Mengaktifkan Mode Proxy untuk: ${url}`);
+            
+            // Tunggu 2 detik dulu biar gak mencurigakan
+            await new Promise(r => setTimeout(r, 2000));
+
+            // --- PILIHAN PROXY GRATIS ---
+            // Kita bungkus URL aslinya supaya request berasal dari server Proxy, bukan Vercel
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+            
+            // Coba lagi lewat jalur proxy
+            return fetchWithRetry(proxyUrl, options, retries - 1);
         }
         
         if (!res.ok) throw new Error(`Status ${res.status}`);
         return res;
+
     } catch (e) {
+        // Kalau masih error juga, coba retry terakhir (kalau sisa retry masih ada)
+        if (retries > 0) {
+            await new Promise(r => setTimeout(r, 2000));
+            return fetchWithRetry(url, options, retries - 1);
+        }
         throw e;
     }
 }
