@@ -2,16 +2,14 @@ import prisma from "@/lib/prisma"
 import { NextResponse } from "next/server"
 import * as cheerio from 'cheerio'
 
-// 1. Paksa Vercel kasih waktu maksimal (60 detik)
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [START] Turbo Cron Job dimulai...");
+    console.log("🚀 [START] Stealth Cron Job dimulai...");
     const startTime = Date.now();
 
     try {
-        // Ambil semua koleksi yang punya user & webhook
         const collections = await prisma.collection.findMany({
             include: { user: true }
         });
@@ -20,21 +18,17 @@ export async function GET(request) {
             return NextResponse.json({ message: "Koleksi kosong." });
         }
 
-        console.log(`⚡ Mengecek ${collections.length} manga secara PARALLEL...`);
+        console.log(`⚡ Mengecek ${collections.length} manga...`);
 
-        // 2. PARALLEL PROCESSING: Jalankan semua cek sekaligus!
-        // Kita pakai Promise.all untuk menunggu semua "kurir" kembali membawa hasil
+        // Parallel Processing
         const results = await Promise.all(collections.map(async (manga) => {
             return await checkSingleManga(manga);
         }));
 
-        // Filter hasil: Ambil log error atau update saja
         const logs = results.filter(r => r !== null);
         const updatesCount = logs.filter(l => l.includes("UPDATE")).length;
         const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
-        console.log(`🏁 [FINISH] Selesai dalam ${duration} detik. Total update: ${updatesCount}`);
-        
         return NextResponse.json({ 
             status: "Selesai", 
             duration: `${duration}s`, 
@@ -48,84 +42,102 @@ export async function GET(request) {
     }
 }
 
-// --- FUNGSI PROSES PER-MANGA (Dibuat terpisah biar rapi) ---
 async function checkSingleManga(manga) {
-    // Validasi User Webhook
-    if (!manga.user?.webhookUrl) return null; // Skip user tanpa webhook (silent)
+    if (!manga.user?.webhookUrl) return null; 
 
     try {
         let chapterBaruText = "";
         const isShinigami = manga.mangaId.length > 30;
 
-        // A. FETCHING DATA (Dengan Anti-Cache & Timeout)
+        // --- KONFIGURASI PENYAMARAN (MIMIC BROWSER) ---
+        const headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+            "Referer": "https://google.com",
+            "Upgrade-Insecure-Requests": "1",
+            "Cache-Control": "max-age=0"
+        };
+
         if (isShinigami) {
-            // API Shinigami
-            const res = await fetch(`https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}&t=${Date.now()}`, { 
+            // API Shinigami (Kita coba handle error 500 dengan fallback/retry)
+            const apiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
+            const res = await fetch(apiUrl, { 
                 next: { revalidate: 0 },
-                signal: AbortSignal.timeout(8000) // Putus jika > 8 detik
+                headers: headers // Pakai header juga di API biar sopan
             });
+            
+            if (res.status === 500) throw new Error("API Server Down/Error (500)");
             if (!res.ok) throw new Error(`API Error ${res.status}`);
+            
             const json = await res.json();
             if (json.data?.latest_chapter_number) {
                 chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
+            } else {
+                throw new Error("Format API berubah/Data kosong");
             }
         } else {
-            // Scrape KomikIndo
-            const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/?t=${Date.now()}`;
+            // Scrape KomikIndo (Target utama 403)
+            const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
+            
             const res = await fetch(targetUrl, {
-                headers: { 
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" 
-                },
+                headers: headers, // <--- INI KUNCINYA
                 cache: 'no-store',
-                signal: AbortSignal.timeout(8000) // Putus jika > 8 detik
+                redirect: 'follow'
             });
+
+            if (res.status === 403) throw new Error("Diblokir Cloudflare (403 Forbidden)");
             if (!res.ok) throw new Error(`Web Error ${res.status}`);
             
             const html = await res.text();
             const $ = cheerio.load(html);
-            const rawText = $('#chapter_list .lchx a').first().text();
-            if (rawText) chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
+            
+            // Coba beberapa selector (kadang web ganti class HTML)
+            let rawText = $('#chapter_list .lchx a').first().text();
+            
+            // Backup selector kalau yang atas gagal
+            if (!rawText) rawText = $('.chapter-list li:first-child a').text();
+
+            if (rawText) {
+                chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
+            } else {
+                throw new Error("Gagal cari elemen chapter di HTML");
+            }
         }
 
-        // B. BANDINGKAN DATA
-        if (!chapterBaruText) throw new Error("Gagal parsing chapter (Kosong)");
+        // --- CEK UPDATE ---
+        if (!chapterBaruText) throw new Error("Hasil parsing kosong");
 
-        // Cek Update
         if (manga.lastChapter !== chapterBaruText) {
             console.log(`🔥 UPDATE: ${manga.title} (${chapterBaruText})`);
             
-            // Update Database
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
             });
 
-            // Kirim Notif (Fire & Forget - Kita tunggu sebentar aja)
             await sendDiscordNotification(manga.title, chapterBaruText, manga.image, manga.user.webhookUrl);
-            
             return `✅ UPDATE [${manga.title}]: ${manga.lastChapter} -> ${chapterBaruText}`;
         }
         
-        return null; // Tidak ada update, return null biar log bersih
+        return null; 
 
     } catch (err) {
-        console.error(`⚠️ Gagal [${manga.title}]: ${err.message}`);
+        // Kita persingkat log error biar enak dibaca
         return `❌ ERROR [${manga.title}]: ${err.message}`;
     }
 }
 
-// Fungsi Kirim Discord (Sama seperti sebelumnya)
 async function sendDiscordNotification(title, chapter, image, webhookUrl) {
     const payload = {
         username: "Manga Spidey 🕷️",
         content: `🚨 **${title}** Update Boss!`,
         embeds: [{
             title: title,
-            url: "https://project-web-manga-rex4red.vercel.app", // Link ke web kamu
+            url: "https://project-web-manga-rex4red.vercel.app",
             description: `Chapter baru: **${chapter}** sudah rilis!`,
             color: 5763719,
             image: { url: image },
-            footer: { text: "Cek sekarang sebelum kena spoiler!" },
             timestamp: new Date().toISOString()
         }]
     };
