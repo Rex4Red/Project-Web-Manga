@@ -64,16 +64,17 @@ export async function GET(request) {
     }
 }
 
+// --- GANTI FUNGSI checkSingleManga DENGAN INI ---
+
 async function checkSingleManga(manga) {
     if (!manga.user?.webhookUrl) return null; 
 
-    const isShinigami = manga.mangaId.length > 30; // ID Panjang biasanya Shinigami/API
+    const isShinigami = manga.mangaId.length > 30; 
     
-    // Header Mobile Android (Paling ampuh tembus blokir)
+    // Header Android (Paling ampuh tembus blokir)
     const headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
         "Referer": "https://google.com",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
     };
 
     try {
@@ -81,8 +82,9 @@ async function checkSingleManga(manga) {
 
         if (isShinigami) {
             // --- LOGIC SHINIGAMI (API) ---
-            // Kita pakai Retry manual untuk menahan Error 429
-            const res = await fetchWithRetry(`https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`, { headers });
+            const apiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
+            // Gunakan fetchWithRetry untuk handle 429 & 500
+            const res = await fetchWithRetry(apiUrl, { headers });
             
             const json = await res.json();
             if (json.data?.latest_chapter_number) {
@@ -92,12 +94,21 @@ async function checkSingleManga(manga) {
             }
 
         } else {
-            // --- LOGIC KOMIKINDO (SCRAPING) ---
+            // --- LOGIC KOMIKINDO (SCRAPING) + AUTO PROXY ---
             const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
-            const res = await fetch(targetUrl, { headers, cache: 'no-store' });
+            
+            // 1. Coba Tembak Langsung
+            let res = await fetch(targetUrl, { headers, cache: 'no-store' });
 
-            if (res.status === 403) return `⛔ BLOCKED [${manga.title}]: KomikIndo tolak akses (403)`;
-            if (!res.ok) return `⚠️ SKIP [${manga.title}]: Web Error ${res.status}`;
+            // 2. Kalau DIBLOKIR (403), Aktifkan Mode Proxy Otomatis!
+            if (res.status === 403) {
+                console.log(`   🛡️ [${manga.title}] Kena 403. Mencoba lewat Proxy...`);
+                // Kita bungkus URL-nya pakai corsproxy.io
+                const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+                res = await fetch(proxyUrl, { headers, cache: 'no-store' });
+            }
+
+            if (!res.ok) return `⚠️ SKIP [${manga.title}]: Gagal total (Status ${res.status})`;
             
             const html = await res.text();
             const $ = cheerio.load(html);
@@ -108,13 +119,12 @@ async function checkSingleManga(manga) {
             if (rawText) {
                 chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
             } else {
-                return `⚠️ SKIP [${manga.title}]: Gagal parsing HTML`;
+                return `⚠️ SKIP [${manga.title}]: Gagal parsing HTML (Struktur web berubah?)`;
             }
         }
 
         // --- CEK UPDATE ---
         if (manga.lastChapter !== chapterBaruText) {
-            // Validasi angka (biar gak update cuma gara-gara beda spasi)
             const numOld = manga.lastChapter.replace(/[^0-9.]/g, '');
             const numNew = chapterBaruText.replace(/[^0-9.]/g, '');
             
@@ -131,9 +141,10 @@ async function checkSingleManga(manga) {
             return `✅ UPDATE [${manga.title}]: ${chapterBaruText}`;
         }
         
-        return null; // Tidak ada update
+        return null; 
 
     } catch (err) {
+        // Cek error fetch biar log gak kepanjangan
         return `❌ ERROR [${manga.title}]: ${err.message}`;
     }
 }
