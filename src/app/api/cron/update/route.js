@@ -180,7 +180,8 @@ async function fetchWithRetry(url, options, retries = 1) {
 async function sendDiscordNotification(title, chapter, image, webhookUrl) {
     const payload = {
         username: "Manga Bot 🤖",
-        content: `🚨 **${title}** Update Boss!`,
+        // 👇 TAMBAHKAN @everyone DI DEPAN KALIMAT
+        content: `@everyone 🚨 **${title}** Update Boss!`, 
         embeds: [{
             title: title,
             description: `Chapter baru: **${chapter}**`,
