@@ -197,25 +197,56 @@ async function sendDiscordNotification(title, chapter, image, webhookUrl) {
 }
 
 // --- FUNGSI NOTIF TELEGRAM (BARU) ---
+// --- FUNGSI NOTIF TELEGRAM (ANTI-ERROR GAMBAR) ---
 async function sendTelegramNotification(title, chapter, image, token, chatId) {
-    // Gunakan 'sendPhoto' biar ada gambarnya
-    const url = `https://api.telegram.org/bot${token}/sendPhoto`;
-    
-    const payload = {
+    const messageText = `🚨 *${title}* Update Boss!\n\nChapter baru: *${chapter}*\n\n_Cek aplikasimu sekarang!_`;
+
+    // Skenario 1: Coba kirim GAMBAR (Kalau ada URL-nya)
+    if (image && image.startsWith("http")) {
+        const urlPhoto = `https://api.telegram.org/bot${token}/sendPhoto`;
+        const payloadPhoto = {
+            chat_id: chatId,
+            photo: image,
+            caption: messageText, // Di sendPhoto, teks itu namanya 'caption'
+            parse_mode: 'Markdown'
+        };
+
+        try {
+            const res = await fetch(urlPhoto, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payloadPhoto)
+            });
+
+            // Jika sukses (200 OK), langsung selesai (return)
+            if (res.ok) return;
+
+            // Jika gagal (400 Bad Request karena gambar rusak), lanjut ke Skenario 2
+            console.log(`⚠️ Gambar rusak untuk [${title}], mencoba kirim teks saja...`);
+            
+        } catch (e) {
+            console.error("Network Error saat kirim gambar Tele:", e);
+            // Lanjut ke Skenario 2
+        }
+    }
+
+    // Skenario 2: Kirim TEKS SAJA (Fallback)
+    // Jalan kalau: Gambar kosong, ATAU kirim gambar tadi gagal
+    const urlMessage = `https://api.telegram.org/bot${token}/sendMessage`;
+    const payloadMessage = {
         chat_id: chatId,
-        photo: image,
-        caption: `🚨 *${title}* Update Boss!\n\nChapter baru: *${chapter}*\n\n_Cek aplikasimu sekarang!_`,
-        parse_mode: 'Markdown'
+        text: messageText, // Di sendMessage, teks itu namanya 'text'
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true // Biar gak muncul preview link aneh-aneh
     };
 
     try {
-        const res = await fetch(url, {
+        await fetch(urlMessage, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payloadMessage)
         });
-        if (!res.ok) console.error("Tele Error:", await res.text());
     } catch (e) {
-        console.error("Telegram Network Error:", e);
+        console.error("Gagal total kirim ke Telegram:", e);
     }
 }
