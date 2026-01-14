@@ -2,12 +2,11 @@ import prisma from "@/lib/prisma"
 import { NextResponse } from "next/server"
 import * as cheerio from 'cheerio'
 
-// Paksa Vercel jalan maksimal 60 detik & selalu fresh (tidak cache)
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [START] Final Cron Job (Proxy Mode)...");
+    console.log("🚀 [START] Hybrid Cron Job (Discord + Telegram)...");
     const startTime = Date.now();
 
     try {
@@ -19,9 +18,8 @@ export async function GET(request) {
             return NextResponse.json({ message: "Koleksi kosong." });
         }
 
-        // --- KONFIGURASI BATCHING (ANTRIAN) ---
-        const BATCH_SIZE = 2; // 2 manga per detik
-        const DELAY_MS = 2000; // Istirahat 2 detik antar batch
+        const BATCH_SIZE = 2; 
+        const DELAY_MS = 2000; 
         
         const logs = [];
         let updatesFound = 0;
@@ -61,11 +59,14 @@ export async function GET(request) {
 }
 
 async function checkSingleManga(manga) {
-    if (!manga.user?.webhookUrl) return null; 
+    // Cek apakah user punya salah satu metode notif (Discord ATAU Telegram)
+    const hasDiscord = !!manga.user?.webhookUrl;
+    const hasTelegram = !!(manga.user?.telegramToken && manga.user?.telegramChatId);
+
+    if (!hasDiscord && !hasTelegram) return null; 
 
     const isShinigami = manga.mangaId.length > 30;
     
-    // Header Android untuk menyamar jadi HP
     const headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
         "Referer": "https://google.com",
@@ -75,20 +76,14 @@ async function checkSingleManga(manga) {
         let chapterBaruText = "";
 
         if (isShinigami) {
-            // --- LOGIC SHINIGAMI (API) ---
+            // --- LOGIC SHINIGAMI ---
             const apiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
-            
-            // Fetch pakai retry & proxy otomatis
             const res = await fetchWithRetry(apiUrl, { headers });
             
-            // SAFE PARSING: Cek dulu apakah isinya JSON beneran?
-            // Ini untuk mengatasi error "Unexpected token <"
             try {
-                const text = await res.text(); // Ambil teks mentah dulu
-                if (text.trim().startsWith("<")) {
-                    throw new Error("API merespon HTML (Error/Block Page)");
-                }
-                const json = JSON.parse(text); // Baru di-parse manual
+                const text = await res.text();
+                if (text.trim().startsWith("<")) throw new Error("API merespon HTML");
+                const json = JSON.parse(text);
                 
                 if (json.data?.latest_chapter_number) {
                     chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
@@ -96,21 +91,16 @@ async function checkSingleManga(manga) {
                     return `⚠️ SKIP [${manga.title}]: Data API tidak lengkap`;
                 }
             } catch (parseErr) {
-                return `⚠️ SKIP [${manga.title}]: Gagal Parse JSON (${parseErr.message})`;
+                return `⚠️ SKIP [${manga.title}]: Gagal Parse JSON`;
             }
 
         } else {
-            // --- LOGIC KOMIKINDO (WEB SCRAPING) ---
+            // --- LOGIC KOMIKINDO ---
             const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
-            
-            // 1. Coba Tembak Langsung
             let res = await fetch(targetUrl, { headers, cache: 'no-store' });
 
-            // 2. Kalau DIBLOKIR (403), Aktifkan Mode Proxy Otomatis!
             if (res.status === 403) {
-                // Log ini HARUS MUNCUL kalau kode berhasil terupdate
-                console.log(`   🛡️ [${manga.title}] Kena 403. Mencoba lewat Proxy...`);
-                
+                console.log(`   🛡️ [${manga.title}] Kena 403. Proxy Mode ON.`);
                 const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
                 res = await fetch(proxyUrl, { headers, cache: 'no-store' });
             }
@@ -137,15 +127,28 @@ async function checkSingleManga(manga) {
             
             if (numOld === numNew && numOld !== "") return null; 
 
-            // Update DB
+            // 1. Update Database
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
             });
 
-            // Kirim Notif
-            await sendDiscordNotification(manga.title, chapterBaruText, manga.image, manga.user.webhookUrl);
-            return `✅ UPDATE [${manga.title}]: ${chapterBaruText}`;
+            // 2. Kirim Notifikasi (Paralel)
+            const notifPromises = [];
+
+            // Kirim ke Discord (Jika ada)
+            if (hasDiscord) {
+                notifPromises.push(sendDiscordNotification(manga.title, chapterBaruText, manga.image, manga.user.webhookUrl));
+            }
+
+            // Kirim ke Telegram (Jika ada)
+            if (hasTelegram) {
+                notifPromises.push(sendTelegramNotification(manga.title, chapterBaruText, manga.image, manga.user.telegramToken, manga.user.telegramChatId));
+            }
+
+            await Promise.all(notifPromises);
+
+            return `✅ UPDATE [${manga.title}]: ${chapterBaruText} (Discord: ${hasDiscord}, Tele: ${hasTelegram})`;
         }
         
         return null; 
@@ -155,18 +158,14 @@ async function checkSingleManga(manga) {
     }
 }
 
-// Fungsi Fetch Pintar (Retry + Auto Proxy untuk API)
 async function fetchWithRetry(url, options, retries = 1) {
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 } });
-        
-        // Kalau error 502/429/403, coba pakai Proxy
         if ((res.status === 502 || res.status === 429 || res.status === 403) && retries > 0) {
             await new Promise(r => setTimeout(r, 2000));
             const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
             return fetchWithRetry(proxyUrl, options, retries - 1);
         }
-        
         return res;
     } catch (e) {
         if (retries > 0) {
@@ -177,11 +176,11 @@ async function fetchWithRetry(url, options, retries = 1) {
     }
 }
 
+// --- FUNGSI NOTIF DISCORD ---
 async function sendDiscordNotification(title, chapter, image, webhookUrl) {
     const payload = {
         username: "Manga Bot 🤖",
-        // 👇 TAMBAHKAN @everyone DI DEPAN KALIMAT
-        content: `@everyone 🚨 **${title}** Update Boss!`, 
+        content: `🚨 **${title}** Update Boss!`,
         embeds: [{
             title: title,
             description: `Chapter baru: **${chapter}**`,
@@ -195,4 +194,28 @@ async function sendDiscordNotification(title, chapter, image, webhookUrl) {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
         });
     } catch (e) { console.error("Discord err", e); }
+}
+
+// --- FUNGSI NOTIF TELEGRAM (BARU) ---
+async function sendTelegramNotification(title, chapter, image, token, chatId) {
+    // Gunakan 'sendPhoto' biar ada gambarnya
+    const url = `https://api.telegram.org/bot${token}/sendPhoto`;
+    
+    const payload = {
+        chat_id: chatId,
+        photo: image,
+        caption: `🚨 *${title}* Update Boss!\n\nChapter baru: *${chapter}*\n\n_Cek aplikasimu sekarang!_`,
+        parse_mode: 'Markdown'
+    };
+
+    try {
+        const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) console.error("Tele Error:", await res.text());
+    } catch (e) {
+        console.error("Telegram Network Error:", e);
+    }
 }

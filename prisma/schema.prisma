@@ -42,7 +42,9 @@ model User {
   emailVerified DateTime?
   image         String?
   password      String?  
-  webhookUrl    String?    
+  webhookUrl    String?
+  telegramToken  String?      // <-- TAMBAHAN BARU
+  telegramChatId String?    
   accounts      Account[]
   sessions      Session[]
   collections   Collection[] 
