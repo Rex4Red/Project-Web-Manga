@@ -35,7 +35,7 @@ interface Manga {
   latest_chapter_text?: string;
   latest_chapter_time?: string;
   source?: string;
-  id?: number; // ID Database (opsional)
+  id?: number; 
 }
 
 function formatTimeAgo(dateString?: string) {
@@ -89,8 +89,10 @@ const normalizeData = (source: string, item: any): Manga => {
 };
 
 // --- COMPONENT CARD ---
-const MangaCard = ({ manga, isFav, onToggleFav, source }: any) => { 
-  // Support field dari API maupun Database
+const MangaCard = ({ manga, isFav, onToggleFav, sourceOverride }: any) => { 
+  // PENTING: Gunakan sourceOverride jika ada (untuk list favorit), kalau tidak pakai dari object manga
+  const activeSource = sourceOverride || manga.source;
+  
   const cover = manga.cover_portrait_url || manga.cover_image_url || manga.image || '/no-image.png'; 
   const time = formatTimeAgo(manga.latest_chapter_time || manga.createdAt); 
   const chapter = manga.latest_chapter_text || manga.lastChapter || (manga.latest_chapter_number ? `Ch. ${manga.latest_chapter_number}` : 'Baru');
@@ -106,8 +108,9 @@ const MangaCard = ({ manga, isFav, onToggleFav, source }: any) => {
         </span>
       </button>
 
+      {/* FIX: Link sekarang pasti benar karena source diambil dari activeSource */}
       <Link 
-        href={`/manga/${manga.manga_id}?source=${source}`} 
+        href={`/manga/${manga.manga_id}?source=${activeSource}`} 
         className="flex flex-col h-full"
       >
         <div className="relative aspect-[3/4] w-full overflow-hidden">
@@ -132,7 +135,7 @@ const MangaCard = ({ manga, isFav, onToggleFav, source }: any) => {
 export default function Home() {
   const [currentSource, setCurrentSource] = useState<'shinigami' | 'komikindo'>('shinigami');
   const [dataList, setDataList] = useState<Manga[]>([]);
-  const [favorites, setFavorites] = useState<Manga[]>([]); // Data dari Database
+  const [favorites, setFavorites] = useState<Manga[]>([]); 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   
@@ -142,18 +145,17 @@ export default function Home() {
   // Helper Proxy
   const withProxy = (url: string) => `/api/proxy?url=${encodeURIComponent(url)}`;
 
-  // 1. FETCH FAVORIT DARI DATABASE (Saat load pertama)
+  // 1. FETCH FAVORIT
   const fetchFavorites = async () => {
     try {
-        const res = await fetch('/api/collection', { cache: 'no-store' }); // Panggil API DB
+        const res = await fetch('/api/collection', { cache: 'no-store' });
         
         if (res.ok) {
             const data = await res.json();
             
-            // Mapping data DB ke format Frontend
             const normalizedFavs = data.map((item: any) => ({
                 ...item,
-                // Logika source: ID Panjang = Shinigami, ID Pendek = Komikindo
+                // Logika pemisah ID:
                 source: item.mangaId.length > 20 ? 'shinigami' : 'komikindo',
                 manga_id: item.mangaId, 
                 cover_portrait_url: item.image,
@@ -169,10 +171,10 @@ export default function Home() {
   };
 
   useEffect(() => {
-    fetchFavorites(); // Panggil saat mount
+    fetchFavorites(); 
   }, []);
 
-  // 2. FETCH DATA KOMIK (API SOURCE)
+  // 2. FETCH DATA (LATEST UPDATE)
   const fetchMangaData = async (query = '') => {
     setLoading(true);
     setErrorMsg('');
@@ -223,7 +225,7 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSource]);
 
-  // 3. HANDLE SEARCH
+  // 3. ACTIONS
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
@@ -237,37 +239,20 @@ export default function Home() {
     fetchMangaData(); 
   };
 
-  // 4. HANDLE ADD TO COLLECTION (DATABASE)
-  // ... (kode lain) ...
-
   const handleToggleFav = async (manga: Manga) => {
-    // 1. Cek apakah komik ini ADA di list favorit lokal?
     const isExist = favorites.find(f => f.manga_id === manga.manga_id);
 
-    // --- SKENARIO HAPUS (UNLOVE) ---
     if (isExist) {
         const yakin = confirm(`Hapus "${manga.title}" dari favorit? 💔`);
         if (!yakin) return;
 
         try {
-            const res = await fetch(`/api/collection?mangaId=${manga.manga_id}`, {
-                method: 'DELETE',
-            });
-
-            if (res.ok) {
-                // Update tampilan secara langsung tanpa refresh halaman
-                setFavorites(prev => prev.filter(item => item.manga_id !== manga.manga_id));
-            } else {
-                alert("Gagal menghapus.");
-            }
-        } catch (e) {
-            console.error("Error delete:", e);
-        }
+            const res = await fetch(`/api/collection?mangaId=${manga.manga_id}`, { method: 'DELETE' });
+            if (res.ok) setFavorites(prev => prev.filter(item => item.manga_id !== manga.manga_id));
+        } catch (e) { console.error(e); }
         return; 
     }
 
-    // --- SKENARIO TAMBAH (LOVE) ---
-    // Persiapan data untuk DB
     const payload = {
         mangaId: manga.manga_id,
         title: manga.title,
@@ -282,27 +267,16 @@ export default function Home() {
             body: JSON.stringify(payload)
         });
 
-        if (res.ok) {
-            await fetchFavorites(); // Refresh list biar data terbaru masuk (termasuk ID dari DB)
-            // Opsional: Kasih notif kecil
-            // alert(`Berhasil ditambahkan! ❤️`); 
-        } else {
-            const err = await res.json();
-            // Jika error karena user belum login (401), arahkan ke login
-            if (res.status === 401) {
-                const mauLogin = confirm("Kamu harus login untuk menyimpan favorit. Mau login sekarang?");
-                if (mauLogin) window.location.href = "/login";
-            } else {
-                alert(err.message || "Gagal menyimpan.");
-            }
+        if (res.ok) await fetchFavorites();
+        else if (res.status === 401) {
+            if (confirm("Login dulu bos?")) window.location.href = "/login";
         }
-    } catch (error) {
-        console.error("Error save fav:", error);
-    }
+    } catch (error) { console.error(error); }
   };
 
-  // Filter tampilan favorit sesuai source yang aktif
-  const currentFavorites = favorites.filter(fav => fav.source === currentSource);
+  // --- PEMISAHAN LIST FAVORIT ---
+  const favShinigami = favorites.filter(f => f.source === 'shinigami');
+  const favKomikindo = favorites.filter(f => f.source === 'komikindo');
 
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 p-4 md:p-8">
@@ -365,42 +339,70 @@ export default function Home() {
             <div className="text-center py-10 bg-red-900/20 rounded-lg border border-red-800">
                 <h3 className="text-red-500 font-bold mb-2">Gagal Memuat Data</h3>
                 <p className="text-gray-400 text-sm">{errorMsg}</p>
-                <p className="text-gray-500 text-xs mt-2">Pastikan API server sedang online.</p>
             </div>
         )}
 
-        {/* CONTENT */}
+        {/* CONTENT UTAMA */}
         {!loading && !errorMsg && (
             <div className="space-y-12 animate-fadeIn">
 
-               {/* --- SECTION FAVORIT (DATABASE) --- */}
-               {currentFavorites.length > 0 && !isSearching && (
+               {/* ========================================= */}
+               {/* 1. SECTION FAVORIT SHINIGAMI (SELALU ADA) */}
+               {/* ========================================= */}
+               {favShinigami.length > 0 && !isSearching && (
                    <section>
-                      <div className="flex items-center gap-2 mb-4">
+                      <div className="flex items-center gap-2 mb-4 border-b border-gray-800 pb-2">
                           <span className="text-red-500 text-xl">♥</span>
-                          <h2 className={`text-xl font-bold ${API_CONFIG[currentSource].textColor}`}>
-                              Favorit Saya ({currentSource})
+                          <h2 className="text-xl font-bold text-purple-400">
+                              Favorit Shinigami
                           </h2>
-                          <span className="text-xs bg-gray-800 px-2 py-0.5 rounded text-gray-400">{currentFavorites.length}</span>
+                          <span className="text-xs bg-purple-900/50 px-2 py-0.5 rounded text-purple-200">{favShinigami.length}</span>
                       </div>
                       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                          {currentFavorites.map((item, idx) => (
+                          {favShinigami.map((item, idx) => (
                             <MangaCard 
-                               key={`fav-${item.manga_id}-${idx}`} 
+                               key={`fav-shin-${item.manga_id}-${idx}`} 
                                manga={item} 
                                isFav={true} 
-                               onToggleFav={handleToggleFav} 
-                               source={currentSource} 
+                               onToggleFav={handleToggleFav}
+                               sourceOverride="shinigami" // <-- PAKSA SOURCE JADI SHINIGAMI
                             />
                           ))}
                       </div>
-                      <div className="border-b border-gray-800 my-8"></div>
                    </section>
                )}
 
-               {/* --- SECTION UPDATE TERBARU --- */}
+               {/* ========================================= */}
+               {/* 2. SECTION FAVORIT KOMIKINDO (SELALU ADA) */}
+               {/* ========================================= */}
+               {favKomikindo.length > 0 && !isSearching && (
+                   <section>
+                      <div className="flex items-center gap-2 mb-4 border-b border-gray-800 pb-2">
+                          <span className="text-red-500 text-xl">♥</span>
+                          <h2 className="text-xl font-bold text-yellow-400">
+                              Favorit KomikIndo
+                          </h2>
+                          <span className="text-xs bg-yellow-900/50 px-2 py-0.5 rounded text-yellow-200">{favKomikindo.length}</span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                          {favKomikindo.map((item, idx) => (
+                            <MangaCard 
+                               key={`fav-kom-${item.manga_id}-${idx}`} 
+                               manga={item} 
+                               isFav={true} 
+                               onToggleFav={handleToggleFav}
+                               sourceOverride="komikindo" // <-- PAKSA SOURCE JADI KOMIKINDO
+                            />
+                          ))}
+                      </div>
+                   </section>
+               )}
+
+               {/* ========================================= */}
+               {/* 3. SECTION LATEST UPDATE (SESUAI TAB)     */}
+               {/* ========================================= */}
                <section>
-                   <div className="flex items-center gap-2 mb-6">
+                   <div className="flex items-center gap-2 mb-6 mt-8">
                       <div className={`h-6 w-2 rounded-full ${API_CONFIG[currentSource].color}`}></div>
                       <h2 className="text-xl font-bold">
                         {isSearching ? `Hasil Pencarian: "${searchQuery}"` : `Update Terbaru (${API_CONFIG[currentSource].name})`}
@@ -415,14 +417,13 @@ export default function Home() {
                                manga={item} 
                                isFav={favorites.some(f => f.manga_id === item.manga_id)} 
                                onToggleFav={handleToggleFav} 
-                               source={currentSource}
+                               sourceOverride={currentSource} // <-- Ikuti tab aktif
                             />
                           ))}
                        </div>
                    ) : (
                        <div className="text-center py-20 text-gray-500 bg-gray-900/50 rounded-lg border border-gray-800">
                            <p className="text-lg">Tidak ada komik ditemukan.</p>
-                           <p className="text-sm mt-2">Coba kata kunci lain atau ganti server.</p>
                        </div>
                    )}
                </section>
