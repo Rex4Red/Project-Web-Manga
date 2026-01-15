@@ -156,7 +156,7 @@ export default function Home() {
             const normalizedFavs = data.map((item: any) => ({
                 ...item,
                 // Logika pemisah ID:
-                source: item.mangaId.length > 20 ? 'shinigami' : 'komikindo',
+                source: item.mangaId.length > 30 ? 'shinigami' : 'komikindo',
                 manga_id: item.mangaId, 
                 cover_portrait_url: item.image,
                 latest_chapter_text: item.lastChapter,
