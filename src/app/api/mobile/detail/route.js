@@ -37,6 +37,7 @@ export async function GET(request) {
 
 // --- LOGIKA SHINIGAMI ---
 // --- LOGIKA SHINIGAMI (PERBAIKAN CHAPTER) ---
+// --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
 async function getShinigamiDetail(id) {
     const targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}`;
     
@@ -48,41 +49,28 @@ async function getShinigamiDetail(id) {
 
     const item = json.data;
     
-    // DEBUG: Cek struktur data
-    // console.log("SHINIGAMI RAW:", JSON.stringify(item).substring(0, 500)); 
-
-    // 1. Cek apakah chapter_list tersedia langsung
+    // 1. Cek apakah chapter_list tersedia langsung di detail
     let rawChapters = item.chapter_list || item.chapters || [];
 
-    // 2. JURUS CADANGAN: Kalau kosong, kita coba fetch endpoint "baca" chapter terbaru
-    // Biasanya di sana ada daftar "chapter lainnya"
-    if (rawChapters.length === 0 && item.latest_chapter_id) {
+    // 2. JURUS BARU: Jika kosong, kita panggil Endpoint Khusus Chapter
+    if (rawChapters.length === 0) {
         try {
-            // Kita tembak endpoint chapter detail untuk dapat list navigasi
-            const chapterUrl = `https://api.sansekai.my.id/api/komik/chapter?chapter_id=${item.latest_chapter_id}`;
-            const resCh = await fetch(chapterUrl, { next: { revalidate: 0 } });
+            console.log(`🔍 Mencari chapter tambahan untuk ID: ${id}`);
+            const chapterUrl = `https://api.sansekai.my.id/api/komik/chapters?manga_id=${id}`;
+            const resChap = await fetch(chapterUrl, { next: { revalidate: 0 } });
             
-            if (resCh.ok) {
-                const jsonCh = await resCh.json();
-                // Biasanya di sini ada navigasi / list chapter lain
-                // Tapi kalau API Sansekai benar-benar membatasi, kita manual saja
-                if (jsonCh.data && jsonCh.data.navigation) {
-                     // Kita tidak bisa ambil full list dari sini, tapi setidaknya kita tahu ada chapter
-                     // Untuk sementara, kita isi manual satu chapter terbaru agar tidak error di HP
-                     rawChapters = [{
-                        chapter_id: item.latest_chapter_id,
-                        chapter_title: `Chapter ${item.latest_chapter_number}`,
-                        chapter_release_date: item.latest_chapter_time
-                     }];
+            if (resChap.ok) {
+                const jsonChap = await resChap.json();
+                if (Array.isArray(jsonChap.data)) {
+                    rawChapters = jsonChap.data; // KETEMU! Pakai data lengkap ini.
                 }
             }
         } catch (e) {
-            console.log("Gagal fetch fallback chapter:", e);
+            console.log("Gagal fetch chapter list tambahan:", e);
         }
     }
 
-    // Kalau masih kosong juga, kita buat Fake Chapter berdasarkan data "Latest Chapter"
-    // Supaya user di HP setidaknya bisa baca chapter terakhir.
+    // 3. Fallback Terakhir (Kalau masih kosong juga, baru pakai single chapter)
     if (rawChapters.length === 0 && item.latest_chapter_id) {
          rawChapters = [{
             chapter_id: item.latest_chapter_id,
@@ -97,6 +85,7 @@ async function getShinigamiDetail(id) {
         synopsis: item.description || item.synopsis || "Tidak ada sinopsis.",
         author: getTaxonomy(item, 'Author'),
         status: item.status === 1 ? "Ongoing" : "Completed",
+        // Mapping data
         chapters: rawChapters.map(ch => ({
             id: String(ch.chapter_id), 
             title: ch.chapter_title,
