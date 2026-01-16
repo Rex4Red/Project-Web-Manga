@@ -14,7 +14,6 @@ export async function GET(request) {
 
     try {
         let images = [];
-
         if (source === 'shinigami') {
             images = await getShinigamiImages(id);
         } else if (source === 'komikindo') {
@@ -23,11 +22,7 @@ export async function GET(request) {
             throw new Error("Source tidak valid");
         }
 
-        return NextResponse.json({
-            status: true,
-            source,
-            data: images
-        });
+        return NextResponse.json({ status: true, source, data: images });
 
     } catch (error) {
         console.error("Chapter Error:", error);
@@ -35,7 +30,6 @@ export async function GET(request) {
     }
 }
 
-// --- LOGIKA SHINIGAMI ---
 async function getShinigamiImages(chapterId) {
     const targetUrl = `https://api.sansekai.my.id/api/komik/chapter?chapter_id=${chapterId}`;
     const res = await fetch(targetUrl, { next: { revalidate: 0 } });
@@ -46,45 +40,71 @@ async function getShinigamiImages(chapterId) {
     return json.data.image_list.map(img => img.image_url);
 }
 
-// --- LOGIKA KOMIKINDO (JURUS ALLORIGINS JSON) ---
+// --- LOGIKA KOMIKINDO (ROTASI PROXY KUAT) ---
 async function getKomikIndoImages(chapterId) {
     const targetUrl = `https://komikindo.tv/${chapterId}/`;
 
-    // Kita pakai AllOrigins mode JSON.
-    // Ini akan mengembalikan JSON { contents: "<html>...</html>" }
-    // Ini lebih ampuh daripada proxy stream biasa.
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-    
-    console.log(`🛡️ Fetching via AllOrigins: ${targetUrl}`);
+    // Daftar Proxy yang akan dicoba berurutan
+    const proxyStrategies = [
+        // 1. AllOrigins (Mode JSON) - Biasanya paling stabil
+        async (url) => {
+            const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { next: { revalidate: 0 } });
+            if (!res.ok) throw new Error("AllOrigins Error");
+            const json = await res.json();
+            return json.contents;
+        },
+        // 2. CodeTabs (Mode Plain HTML) - Cadangan kuat
+        async (url) => {
+             const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, { 
+                 headers: { "User-Agent": "Mozilla/5.0" },
+                 next: { revalidate: 0 } 
+             });
+             if (!res.ok) throw new Error("CodeTabs Error");
+             return await res.text();
+        },
+        // 3. CorsProxy (Mode Plain HTML) - Cadangan terakhir
+        async (url) => {
+             const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, { next: { revalidate: 0 } });
+             if (!res.ok) throw new Error("CorsProxy Error");
+             return await res.text();
+        }
+    ];
 
-    const res = await fetch(proxyUrl, { next: { revalidate: 0 } });
-    if (!res.ok) throw new Error("Proxy AllOrigins Bermasalah");
+    let html = "";
+    let lastError = null;
 
-    const json = await res.json();
-    if (!json.contents) throw new Error("Konten kosong dari Proxy");
+    // Loop mencoba setiap strategi
+    for (const strategy of proxyStrategies) {
+        try {
+            console.log("Mencoba Proxy...");
+            html = await strategy(targetUrl);
+            
+            // Cek apakah hasilnya valid (bukan Cloudflare challenge)
+            if (html && !html.includes("Just a moment") && !html.includes("Attention Required")) {
+                // Cek apakah ada gambar
+                const $ = cheerio.load(html);
+                if ($('#chimg img, .reading-content img').length > 0) {
+                    break; // Sukses! Keluar dari loop
+                }
+            }
+        } catch (e) {
+            console.log("Proxy gagal, lanjut ke berikutnya...", e.message);
+            lastError = e;
+        }
+    }
 
-    const html = json.contents;
+    if (!html) throw new Error("Semua Proxy gagal menembus KomikIndo.");
+
+    // Parsing Gambar
     const $ = cheerio.load(html);
-    
     const images = [];
-
-    // Selector gambar KomikIndo
     $('#chimg img, .reading-content img').each((i, el) => {
         let src = $(el).attr('src') || $(el).attr('data-src');
         if (src && !src.includes('baca-juga')) {
-            // Bersihkan URL (kadang ada query param aneh)
-            src = src.trim();
-            images.push(src);
+            images.push(src.trim());
         }
     });
 
-    if (images.length === 0) {
-        // Debug: Cek apakah kena Cloudflare challenge
-        if (html.includes("Attention Required") || html.includes("Just a moment")) {
-             throw new Error("Terblokir Cloudflare (Server-side scraping gagal).");
-        }
-        throw new Error("Gambar tidak ditemukan (Selector tidak cocok)");
-    }
-
+    if (images.length === 0) throw new Error("Gambar tidak ditemukan dalam HTML");
     return images;
 }
