@@ -35,11 +35,7 @@ export async function GET(request) {
     }
 }
 
-// --- LOGIKA SHINIGAMI ---
-// --- LOGIKA SHINIGAMI (PERBAIKAN CHAPTER) ---
-// --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
-// --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
-// --- LOGIKA SHINIGAMI (REVISI ENDPOINT SWAGGER) ---
+// --- LOGIKA SHINIGAMI (FIX EMPTY TITLE) ---
 async function getShinigamiDetail(id) {
     const targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}`;
     
@@ -54,18 +50,14 @@ async function getShinigamiDetail(id) {
     // 1. Cek apakah chapter_list tersedia langsung
     let rawChapters = item.chapter_list || item.chapters || [];
 
-    // 2. JURUS BARU (FIXED): Panggil endpoint /chapterlist sesuai Swagger
+    // 2. Jika kosong, panggil endpoint /chapterlist
     if (rawChapters.length === 0) {
         try {
-            // Perhatikan: chapterlist (bukan chapters)
             const chapterUrl = `https://api.sansekai.my.id/api/komik/chapterlist?manga_id=${id}`;
-            console.log(`🔍 Fetching Extra Chapters: ${chapterUrl}`);
-            
             const resChap = await fetch(chapterUrl, { next: { revalidate: 0 } });
             
             if (resChap.ok) {
                 const jsonChap = await resChap.json();
-                // Biasanya datanya ada di jsonChap.data atau jsonChap.list
                 if (Array.isArray(jsonChap.data)) {
                     rawChapters = jsonChap.data;
                 }
@@ -75,7 +67,7 @@ async function getShinigamiDetail(id) {
         }
     }
 
-    // 3. Fallback Terakhir
+    // 3. Fallback Single Chapter
     if (rawChapters.length === 0 && item.latest_chapter_id) {
          rawChapters = [{
             chapter_id: item.latest_chapter_id,
@@ -90,74 +82,55 @@ async function getShinigamiDetail(id) {
         synopsis: item.description || item.synopsis || "Tidak ada sinopsis.",
         author: getTaxonomy(item, 'Author'),
         status: item.status === 1 ? "Ongoing" : "Completed",
+        // MAPPING YANG LEBIH KUAT
         chapters: rawChapters.map(ch => ({
-            id: String(ch.chapter_id), 
-            title: ch.chapter_title,
-            date: ch.chapter_release_date || ""
+            id: String(ch.chapter_id || ch.id), 
+            title: getChapterTitle(ch), // Pakai fungsi helper
+            date: ch.chapter_release_date || ch.release_date || ""
         }))
     };
 }
 
-// Helper untuk ambil Author dari Taxonomy Shinigami
+// Helper untuk menebak nama key judul
+function getChapterTitle(ch) {
+    if (ch.chapter_title) return ch.chapter_title;
+    if (ch.title) return ch.title;
+    if (ch.name) return ch.name;
+    if (ch.chapter_number) return `Chapter ${ch.chapter_number}`;
+    return "Chapter Baru";
+}
+
 function getTaxonomy(item, key) {
     if (!item.taxonomy || !item.taxonomy[key]) return "Unknown";
     return item.taxonomy[key].map(t => t.name).join(", ");
 }
 
-// --- LOGIKA KOMIKINDO (MULTI-PROXY) ---
+// --- LOGIKA KOMIKINDO (SAMA SEPERTI SEBELUMNYA) ---
 async function getKomikIndoDetail(id) {
     const targetUrl = `https://komikindo.tv/komik/${id}/`;
     
-    // DAFTAR PROXY GRATISAN (Cadangan)
+    // Proxy Rotator Sederhana
     const proxies = [
-        // Proxy 1: AllOrigins (Sering tembus)
         (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-        // Proxy 2: CorsProxy (Yang tadi kamu pakai)
         (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-        // Proxy 3: CodeTabs (Cadangan terakhir)
-        (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
     ];
 
+    let html = "";
     let lastError = null;
 
-    // Loop mencoba setiap proxy sampai berhasil
-    for (const makeProxyUrl of proxies) {
+    // Coba proxy satu per satu
+    for (const makeProxy of proxies) {
         try {
-            const proxyUrl = makeProxyUrl(targetUrl);
-            console.log(`🛡️ Mencoba Proxy: ${proxyUrl.substring(0, 30)}...`);
-
-            const res = await fetch(proxyUrl, {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-                },
-                next: { revalidate: 0 }
-            });
-
-            // Kalau sukses (200), langsung proses dan BREAK loop
+            const res = await fetch(makeProxy(targetUrl), { next: { revalidate: 0 } });
             if (res.ok) {
-                const html = await res.text();
-                // Validasi: Kalau isinya Cloudflare Challenge, anggap gagal
-                if (html.includes("Just a moment") || html.includes("Attention Required")) {
-                    throw new Error("Terblokir Cloudflare Challenge");
-                }
-                
-                return parseKomikIndoHtml(html); // Sukses!
+                html = await res.text();
+                if (!html.includes("Just a moment")) break; // Berhasil!
             }
-            
-            throw new Error(`Status ${res.status}`);
-
-        } catch (err) {
-            console.log(`   ❌ Gagal: ${err.message}`);
-            lastError = err;
-            // Lanjut ke proxy berikutnya...
-        }
+        } catch (e) { lastError = e; }
     }
 
-    throw new Error(`Gagal menembus KomikIndo setelah 3 percobaan. Error terakhir: ${lastError.message}`);
-}
+    if (!html) throw new Error("Gagal load KomikIndo");
 
-// Fungsi Parsing HTML dipisah biar rapi
-function parseKomikIndoHtml(html) {
     const $ = cheerio.load(html);
 
     const title = $('.infoanime h1.entry-title').text().replace("Komik ", "").trim();
