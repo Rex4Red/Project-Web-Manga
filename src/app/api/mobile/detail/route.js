@@ -39,6 +39,7 @@ export async function GET(request) {
 // --- LOGIKA SHINIGAMI (PERBAIKAN CHAPTER) ---
 // --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
 // --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
+// --- LOGIKA SHINIGAMI (REVISI ENDPOINT SWAGGER) ---
 async function getShinigamiDetail(id) {
     const targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}`;
     
@@ -50,20 +51,23 @@ async function getShinigamiDetail(id) {
 
     const item = json.data;
     
-    // 1. Cek apakah chapter_list tersedia langsung di detail
+    // 1. Cek apakah chapter_list tersedia langsung
     let rawChapters = item.chapter_list || item.chapters || [];
 
-    // 2. JURUS BARU: Jika kosong, kita panggil Endpoint Khusus Chapter
+    // 2. JURUS BARU (FIXED): Panggil endpoint /chapterlist sesuai Swagger
     if (rawChapters.length === 0) {
         try {
-            console.log(`🔍 Mencari chapter tambahan untuk ID: ${id}`);
-            const chapterUrl = `https://api.sansekai.my.id/api/komik/chapters?manga_id=${id}`;
+            // Perhatikan: chapterlist (bukan chapters)
+            const chapterUrl = `https://api.sansekai.my.id/api/komik/chapterlist?manga_id=${id}`;
+            console.log(`🔍 Fetching Extra Chapters: ${chapterUrl}`);
+            
             const resChap = await fetch(chapterUrl, { next: { revalidate: 0 } });
             
             if (resChap.ok) {
                 const jsonChap = await resChap.json();
+                // Biasanya datanya ada di jsonChap.data atau jsonChap.list
                 if (Array.isArray(jsonChap.data)) {
-                    rawChapters = jsonChap.data; // KETEMU! Pakai data lengkap ini.
+                    rawChapters = jsonChap.data;
                 }
             }
         } catch (e) {
@@ -71,7 +75,7 @@ async function getShinigamiDetail(id) {
         }
     }
 
-    // 3. Fallback Terakhir (Kalau masih kosong juga, baru pakai single chapter)
+    // 3. Fallback Terakhir
     if (rawChapters.length === 0 && item.latest_chapter_id) {
          rawChapters = [{
             chapter_id: item.latest_chapter_id,
@@ -86,7 +90,6 @@ async function getShinigamiDetail(id) {
         synopsis: item.description || item.synopsis || "Tidak ada sinopsis.",
         author: getTaxonomy(item, 'Author'),
         status: item.status === 1 ? "Ongoing" : "Completed",
-        // Mapping data
         chapters: rawChapters.map(ch => ({
             id: String(ch.chapter_id), 
             title: ch.chapter_title,
