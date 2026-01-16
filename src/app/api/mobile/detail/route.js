@@ -38,6 +38,7 @@ export async function GET(request) {
 // --- LOGIKA SHINIGAMI ---
 // --- LOGIKA SHINIGAMI (PERBAIKAN CHAPTER) ---
 // --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
+// --- LOGIKA SHINIGAMI (REVISI FULL CHAPTER) ---
 async function getShinigamiDetail(id) {
     const targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}`;
     
