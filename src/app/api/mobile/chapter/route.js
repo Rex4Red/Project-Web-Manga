@@ -51,11 +51,9 @@ async function getShinigamiImages(chapterId) {
 
 // --- LOGIKA KOMIKINDO (Multiproxy) ---
 async function getKomikIndoImages(chapterId) {
-    // ID KomikIndo biasanya format "chapter-judul-10/"
-    // Kita harus pastikan URL-nya benar
     const targetUrl = `https://komikindo.tv/${chapterId}/`;
 
-    // Rotasi Proxy (Sama seperti detail)
+    // Rotasi Proxy (Sama seperti detail, untuk menembus blokir)
     const proxies = [
         (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
         (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
@@ -78,11 +76,11 @@ async function getKomikIndoImages(chapterId) {
                 const html = await res.text();
                 if (html.includes("Just a moment")) throw new Error("Cloudflare");
                 
-                // Parsing Gambar
+                // Parsing Gambar pakai Cheerio
                 const $ = cheerio.load(html);
                 const images = [];
                 
-                // Selector KomikIndo biasanya ini
+                // Cari gambar di dalam konten chapter
                 $('#chimg img, .reading-content img').each((i, el) => {
                     const src = $(el).attr('src') || $(el).attr('data-src');
                     if (src) images.push(src);
@@ -95,5 +93,5 @@ async function getKomikIndoImages(chapterId) {
         }
     }
     
-    throw new Error("Gagal mengambil gambar KomikIndo: " + (lastError?.message || "Unknown"));
+    throw new Error("Gagal mengambil gambar KomikIndo (Coba lagi nanti)");
 }
