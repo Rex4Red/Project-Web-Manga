@@ -18,8 +18,6 @@ export async function GET(request) {
             images = await getShinigamiImages(id);
         } else if (source === 'komikindo') {
             images = await getKomikIndoImages(id);
-        } else {
-            throw new Error("Source tidak valid");
         }
 
         return NextResponse.json({ status: true, source, data: images });
@@ -34,77 +32,70 @@ async function getShinigamiImages(chapterId) {
     const targetUrl = `https://api.sansekai.my.id/api/komik/chapter?chapter_id=${chapterId}`;
     const res = await fetch(targetUrl, { next: { revalidate: 0 } });
     if (!res.ok) throw new Error("Gagal fetch Shinigami");
-    
     const json = await res.json();
     if (!json.data || !json.data.image_list) throw new Error("Gambar tidak ditemukan");
     return json.data.image_list.map(img => img.image_url);
 }
 
-// --- LOGIKA KOMIKINDO (ROTASI PROXY KUAT) ---
+// --- LOGIKA KOMIKINDO (DEBUG MODE) ---
 async function getKomikIndoImages(chapterId) {
+    // Pastikan format ID benar. KomikIndo URL biasanya: https://komikindo.tv/{slug}/
+    // Kalau ID dari list sudah lengkap (misal: "chapter-805-judul"), langsung pakai.
     const targetUrl = `https://komikindo.tv/${chapterId}/`;
 
-    // Daftar Proxy yang akan dicoba berurutan
-    const proxyStrategies = [
-        // 1. AllOrigins (Mode JSON) - Biasanya paling stabil
-        async (url) => {
-            const res = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`, { next: { revalidate: 0 } });
-            if (!res.ok) throw new Error("AllOrigins Error");
-            const json = await res.json();
-            return json.contents;
-        },
-        // 2. CodeTabs (Mode Plain HTML) - Cadangan kuat
-        async (url) => {
-             const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, { 
-                 headers: { "User-Agent": "Mozilla/5.0" },
-                 next: { revalidate: 0 } 
-             });
-             if (!res.ok) throw new Error("CodeTabs Error");
-             return await res.text();
-        },
-        // 3. CorsProxy (Mode Plain HTML) - Cadangan terakhir
-        async (url) => {
-             const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`, { next: { revalidate: 0 } });
-             if (!res.ok) throw new Error("CorsProxy Error");
-             return await res.text();
-        }
-    ];
+    // Kita pakai AllOrigins karena paling stabil untuk teks HTML
+    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+    
+    console.log(`🛡️ Fetching: ${targetUrl}`);
 
-    let html = "";
-    let lastError = null;
+    const res = await fetch(proxyUrl, { next: { revalidate: 0 } });
+    if (!res.ok) throw new Error("Proxy Gagal Mengakses URL");
 
-    // Loop mencoba setiap strategi
-    for (const strategy of proxyStrategies) {
-        try {
-            console.log("Mencoba Proxy...");
-            html = await strategy(targetUrl);
-            
-            // Cek apakah hasilnya valid (bukan Cloudflare challenge)
-            if (html && !html.includes("Just a moment") && !html.includes("Attention Required")) {
-                // Cek apakah ada gambar
-                const $ = cheerio.load(html);
-                if ($('#chimg img, .reading-content img').length > 0) {
-                    break; // Sukses! Keluar dari loop
-                }
-            }
-        } catch (e) {
-            console.log("Proxy gagal, lanjut ke berikutnya...", e.message);
-            lastError = e;
-        }
+    const json = await res.json();
+    if (!json.contents) throw new Error("Konten Proxy Kosong");
+
+    const html = json.contents;
+    const $ = cheerio.load(html);
+    
+    // Cek Title Halaman (Buat deteksi apakah kena Cloudflare)
+    const pageTitle = $('title').text();
+    console.log("Page Title:", pageTitle);
+
+    if (pageTitle.includes("Just a moment") || pageTitle.includes("Attention Required")) {
+        throw new Error("Terblokir Cloudflare (Page Title: Just a moment...)");
     }
 
-    if (!html) throw new Error("Semua Proxy gagal menembus KomikIndo.");
-
-    // Parsing Gambar
-    const $ = cheerio.load(html);
     const images = [];
-    $('#chimg img, .reading-content img').each((i, el) => {
-        let src = $(el).attr('src') || $(el).attr('data-src');
-        if (src && !src.includes('baca-juga')) {
-            images.push(src.trim());
+
+    // STRATEGI BARU: AMBIL SEMUA GAMBAR, FILTER KEMUDIAN
+    $('img').each((i, el) => {
+        // Cek semua kemungkinan atribut src
+        let src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src');
+        
+        if (src) {
+            src = src.trim();
+            // Filter Logika: Gambar komik biasanya format jpg/png/webp dan BUKAN logo/iklan
+            // Dan biasanya ukurannya besar atau ada kata 'uploads' di URL-nya
+            if (
+                !src.includes('logo') && 
+                !src.includes('iklan') && 
+                !src.includes('banner') &&
+                !src.includes('facebook') &&
+                (src.includes('uploads') || src.includes('wp-content') || src.includes('cdn'))
+            ) {
+                images.push(src);
+            }
         }
     });
 
-    if (images.length === 0) throw new Error("Gambar tidak ditemukan dalam HTML");
-    return images;
+    // Hapus duplikat
+    const uniqueImages = [...new Set(images)];
+
+    if (uniqueImages.length === 0) {
+        // Debugging: Kirim sedikit potongan HTML biar tau isinya apa
+        const snippet = html.substring(0, 200).replace(/</g, "&lt;");
+        throw new Error(`Gambar tidak ditemukan. Judul Halaman: "${pageTitle}".`);
+    }
+
+    return uniqueImages;
 }
