@@ -7,6 +7,7 @@ export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 // 1. Inisialisasi Supabase dengan SERVICE ROLE (Wajib, untuk akses Admin)
+// Kita pakai Service Role supaya bisa baca/tulis database tanpa login user
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 
@@ -24,6 +25,7 @@ export async function GET(request) {
 
     try {
         // 2. Ambil semua bookmark + settingan notifikasi usernya
+        // Kita join tabel 'bookmarks' dengan 'user_settings'
         const { data: bookmarks, error } = await supabase
             .from('bookmarks')
             .select(`
@@ -32,8 +34,7 @@ export async function GET(request) {
                     discord_webhook,
                     telegram_bot_token,
                     telegram_chat_id
-                ),
-                users:user_id ( email ) 
+                )
             `);
 
         if (error) throw error;
@@ -42,7 +43,7 @@ export async function GET(request) {
         console.log(`Mengecek ${bookmarks.length} komik...`);
 
         // 3. Proses per Batch (Agar tidak time out)
-        const BATCH_SIZE = 5;
+        const BATCH_SIZE = 3; // Cek 3 komik sekaligus
         
         for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
             // Rem Darurat: Stop jika waktu server tinggal dikit (50 detik)
@@ -97,7 +98,7 @@ async function checkMangaUpdate(item) {
             if (res.ok) {
                 const json = await res.json();
                 if (json.data?.latest_chapter_number) {
-                    // Format API biasanya angka saja, kita tambah "Chapter" biar rapi
+                    // Format API biasanya angka saja (misal: 100), kita tambah "Chapter"
                     latestChapter = `Chapter ${json.data.latest_chapter_number}`;
                 }
             }
@@ -134,7 +135,8 @@ async function checkMangaUpdate(item) {
                 .eq('id', item.id);
 
             // 2. Kirim Notifikasi (Sesuai settingan user)
-            const settings = item.user_settings; // Karena kita join tabel tadi
+            // Karena kita pakai .select user_settings, datanya ada di item.user_settings
+            const settings = item.user_settings; 
             
             if (settings) {
                 // Discord
