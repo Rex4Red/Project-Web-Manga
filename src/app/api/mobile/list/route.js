@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
 import * as cheerio from 'cheerio';
 
-// Wajib Node.js Runtime untuk Cheerio
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    const debugLogs = []; // Kita tampung log di sini buat dikirim ke JSON
+    const debugLogs = []; 
     
     try {
         const { searchParams } = new URL(request.url);
@@ -26,16 +25,11 @@ export async function GET(request) {
                 searchKomikIndo(query, debugLogs)
             ]);
 
-            if (shinigamiRes.status === 'fulfilled') {
-                data = [...data, ...shinigamiRes.value];
-            }
-            if (komikindoRes.status === 'fulfilled') {
-                data = [...data, ...komikindoRes.value];
-            }
+            if (shinigamiRes.status === 'fulfilled') data = [...data, ...shinigamiRes.value];
+            if (komikindoRes.status === 'fulfilled') data = [...data, ...komikindoRes.value];
         } 
         // --- SKENARIO 2: LIST POPULAR ---
         else {
-            debugLogs.push("📜 Mode: List Popular");
             if (source === 'komikindo') {
                 data = await getKomikIndoList(page, debugLogs);
             } else {
@@ -43,11 +37,10 @@ export async function GET(request) {
             }
         }
 
-        // Return Data + Debug Logs (Supaya ketahuan errornya apa)
         return NextResponse.json({ 
             status: true, 
             total: data.length,
-            debug_logs: debugLogs, // <--- Cek ini nanti di browser
+            debug_logs: debugLogs, 
             data: data 
         });
 
@@ -63,73 +56,60 @@ export async function GET(request) {
 // ================= HELPER FUNCTIONS =================
 
 const COMMON_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 };
 
 // --- 1. SHINIGAMI ---
 async function searchShinigami(query, logs) {
     try {
         const url = `https://api.sansekai.my.id/api/komik/search?query=${encodeURIComponent(query)}`;
-        logs.push(`Testing Shinigami API: ${url}`);
-        
         const res = await fetch(url, { headers: COMMON_HEADERS });
-        if (!res.ok) {
-            logs.push(`❌ Shinigami API Error: ${res.status}`);
-            return [];
-        }
-        
         const json = await res.json();
+        
         if (json.status && json.data) {
             logs.push(`✅ Shinigami Found: ${json.data.length}`);
-            return mapShinigami(json.data);
-        } else {
-            logs.push(`⚠️ Shinigami Empty Data`);
-            return [];
+            return json.data.map(item => ({
+                id: item.manga_id || item.link,
+                title: item.title,
+                image: item.thumbnail || item.image,
+                chapter: item.latest_chapter || "Ch. ?",
+                score: item.score || "N/A",
+                type: 'shinigami' 
+            }));
         }
+        logs.push(`⚠️ Shinigami Empty Data`);
+        return [];
     } catch (e) { 
-        logs.push(`🔥 Shinigami Exception: ${e.message}`);
+        logs.push(`🔥 Shinigami Error: ${e.message}`);
         return []; 
     }
 }
 
 async function getShinigamiList(page, logs) {
+    // Sama seperti search tapi endpoint popular
     try {
         const res = await fetch(`https://api.sansekai.my.id/api/komik/popular?page=${page}`, { headers: COMMON_HEADERS });
         const json = await res.json();
-        return (json.status && json.data) ? mapShinigami(json.data) : [];
+        return (json.status && json.data) ? json.data.map(item => ({
+            id: item.manga_id, title: item.title, image: item.thumbnail, chapter: item.latest_chapter, score: item.score, type: 'shinigami'
+        })) : [];
     } catch (e) { return []; }
-}
-
-function mapShinigami(data) {
-    return data.map(item => ({
-        id: item.manga_id || item.link,
-        title: item.title,
-        image: item.thumbnail || item.image,
-        chapter: item.latest_chapter || "Ch. ?",
-        score: item.score || "N/A",
-        type: 'shinigami' 
-    }));
 }
 
 // --- 2. KOMIKINDO ---
 async function searchKomikIndo(query, logs) {
-    const url = `https://komikindo.tv/?s=${encodeURIComponent(query)}`;
-    return await scrapeKomikIndo(url, logs);
+    return await scrapeKomikIndo(`https://komikindo.tv/?s=${encodeURIComponent(query)}`, logs);
 }
 
 async function getKomikIndoList(page, logs) {
-    const url = `https://komikindo.tv/daftar-manga/page/${page}/`;
-    return await scrapeKomikIndo(url, logs);
+    return await scrapeKomikIndo(`https://komikindo.tv/daftar-manga/page/${page}/`, logs);
 }
 
 async function scrapeKomikIndo(url, logs) {
     try {
-        logs.push(`Scraping KomikIndo: ${url}`);
         const res = await fetchSmart(url);
-        
         if (!res.ok) {
-            logs.push(`❌ KomikIndo Fetch Failed: ${res.status}`);
+            logs.push(`❌ KomikIndo HTTP Error: ${res.status}`);
             return [];
         }
         
@@ -137,56 +117,72 @@ async function scrapeKomikIndo(url, logs) {
         const $ = cheerio.load(html);
         const results = [];
 
-        // Selector Update
+        // Coba beberapa selector container
         let container = $('.animepost');
         if (container.length === 0) container = $('.film-list .animepost'); 
+        if (container.length === 0) container = $('.list-update_items .list-update_item');
         
         logs.push(`KomikIndo Container Found: ${container.length}`);
 
         container.each((i, el) => {
-            const title = $(el).find('h4').text().trim();
+            // 1. CARI JUDUL (Coba berbagai cara)
+            let title = $(el).find('h4').text().trim();
+            if (!title) title = $(el).find('.title').text().trim();
+            if (!title) title = $(el).find('a').attr('title'); // Kadang judul ada di atribut title
+            
+            // 2. CARI LINK & GAMBAR
             const link = $(el).find('a').attr('href');
             let image = $(el).find('img').attr('src');
             
-            // Fix Image URL
-            if (image && image.includes('?')) image = image.split('?')[0]; 
-            if (image && !image.startsWith('http')) image = `https:${image}`;
+            // Fix URL Image
+            if (image) {
+                if (image.includes('?')) image = image.split('?')[0]; 
+                if (!image.startsWith('http')) image = `https:${image}`;
+            }
 
             const chapter = $(el).find('.lsch a').text().replace("Komik", "").trim() || "Ch. ?";
-            let id = link ? link.split('/komik/')[1] : '';
-            if (id) id = id.replace(/\/$/, '');
+            const score = $(el).find('.rating i').text().trim() || "N/A";
+
+            // 3. CARI ID (Paling Penting & Sering Error)
+            let id = '';
+            if (link) {
+                // Hapus slash di akhir link dulu: .../komik/naruto/ -> .../komik/naruto
+                const cleanLink = link.replace(/\/$/, '');
+                // Ambil bagian paling belakang dari URL
+                const parts = cleanLink.split('/');
+                id = parts[parts.length - 1]; 
+            }
+
+            // LOG DEBUG DALAM LOOP (Hanya 3 pertama biar log gak penuh)
+            if (i < 3) logs.push(`Item ${i}: Title="${title}", ID="${id}"`);
 
             if (title && id) {
                 results.push({
-                    id, title, image, chapter, score: "N/A",
+                    id, title, image, chapter, score,
                     type: 'komikindo'
                 });
             }
         });
         return results;
     } catch (e) { 
-        logs.push(`🔥 KomikIndo Exception: ${e.message}`);
+        logs.push(`🔥 KomikIndo Scrape Error: ${e.message}`);
         return []; 
     }
 }
 
-// --- 3. FETCH PINTAR (Proxy Rotation) ---
+// --- 3. FETCH PINTAR ---
 async function fetchSmart(url) {
-    // 1. Coba Direct (Paling Cepat)
     try {
+        // Coba Direct
         const res = await fetch(url, { headers: COMMON_HEADERS, next: { revalidate: 0 } }); 
         if (res.ok) return res;
     } catch (e) {}
 
-    // 2. Coba CorsProxy (Alternatif 1)
     try {
+        // Coba Proxy
         const proxy = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-        const res = await fetch(proxy, { headers: COMMON_HEADERS });
-        if (res.ok) return res;
+        return await fetch(proxy, { headers: COMMON_HEADERS });
     } catch (e) {}
-
-    // 3. Coba AllOrigins (Alternatif 2 - JSON output, perlu handling beda)
-    // Kita skip dulu biar simple, fokus ke 2 di atas.
     
-    throw new Error("Semua jalur fetch gagal.");
+    throw new Error("Gagal fetch.");
 }
