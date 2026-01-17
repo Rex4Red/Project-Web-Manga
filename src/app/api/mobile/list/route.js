@@ -4,6 +4,10 @@ import * as cheerio from 'cheerio';
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
+// URL API DARI KAMU
+const API_SHINIGAMI = "https://api.sansekai.my.id/api";
+const API_KOMIKINDO_HF = "https://rex4red-komik-api-scrape.hf.space";
+
 export async function GET(request) {
     const debugLogs = []; 
     
@@ -32,10 +36,8 @@ export async function GET(request) {
             debugLogs.push("📜 Mode: Home / Latest");
             
             if (source === 'komikindo') {
-                // Prioritas: Scraping Halaman Home (Paling Akurat untuk Update)
                 data = await getKomikIndoHome(page, debugLogs);
             } else {
-                // Prioritas: API Latest Shinigami
                 data = await getShinigamiHome(page, debugLogs);
             }
         }
@@ -52,38 +54,34 @@ export async function GET(request) {
     }
 }
 
-// ================= API SHINIGAMI (Sansekai) =================
-// Docs: https://api.sansekai.my.id/
+// ================= 1. SHINIGAMI (Sansekai API) =================
 
 async function searchShinigami(query, logs) {
-    const url = `https://api.sansekai.my.id/api/komik/search?query=${encodeURIComponent(query)}`;
-    return await fetchShinigami(url, logs);
+    // Search endpoint standard
+    return await fetchShinigami(`${API_SHINIGAMI}/komik/search?query=${encodeURIComponent(query)}`, logs);
 }
 
 async function getShinigamiHome(page, logs) {
-    // 1. Coba 'Latest' (Sesuai Swagger: No Parameters, jadi page mungkin diabaikan atau query string)
-    // Kita coba fetch endpoint ini dulu.
-    logs.push("🔍 Shinigami: Fetching /api/komik/latest");
-    let data = await fetchShinigami(`https://api.sansekai.my.id/api/komik/latest`, logs);
+    // [FIX] Sesuai Screenshot Swagger: /komik/latest tidak butuh parameter page
+    // Tapi kita coba endpoint 'project' juga karena biasanya lebih lengkap untuk Home
     
-    // 2. Kalau kosong, coba 'List Project' (Biasanya update-an admin)
-    if (data.length === 0) {
-        logs.push("⚠️ Latest Empty. Shinigami: Fetching /api/komik/list?type=project");
-        data = await fetchShinigami(`https://api.sansekai.my.id/api/komik/list?type=project`, logs);
-    }
+    logs.push("🔍 Shinigami: Trying /latest (No Params)");
+    let data = await fetchShinigami(`${API_SHINIGAMI}/komik/latest`, logs);
 
+    // Kalau kosong, coba endpoint Project (Back up)
+    if (data.length === 0) {
+        logs.push("⚠️ Latest Empty. Trying /list?type=project");
+        data = await fetchShinigami(`${API_SHINIGAMI}/komik/list?type=project`, logs);
+    }
+    
     return data;
 }
 
 async function fetchShinigami(url, logs) {
     try {
-        const res = await fetch(url, { 
-            headers: { "User-Agent": "Mozilla/5.0" },
-            next: { revalidate: 0 } 
-        });
+        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, next: { revalidate: 0 } });
         const json = await res.json();
         
-        // Handle response wrapper (kadang ada di data.data, kadang langsung data)
         let items = [];
         if (json.data && Array.isArray(json.data)) items = json.data;
         else if (json.data?.data && Array.isArray(json.data.data)) items = json.data.data;
@@ -102,25 +100,57 @@ async function fetchShinigami(url, logs) {
     }
 }
 
-
-// ================= API KOMIKINDO (Scraper) =================
-// Target: https://komikindo.tv/
+// ================= 2. KOMIKINDO (HF API + Scraper Fallback) =================
 
 async function searchKomikIndo(query, logs) {
-    // Search pakai parameter ?s=
+    // 1. Coba Tembak API Hugging Face dulu (Tebakan endpoint standar scraper)
+    const apiData = await fetchKomikIndoApi(`${API_KOMIKINDO_HF}/api/komikindo/search?q=${query}`, logs);
+    if (apiData.length > 0) return apiData;
+
+    // 2. Kalau API gagal, Fallback ke Scraper Manual
     return await scrapeKomikIndo(`https://komikindo.tv/?s=${encodeURIComponent(query)}`, logs, true);
 }
 
 async function getKomikIndoHome(page, logs) {
-    // Home Page KomikIndo (Root URL) -> Isinya Update Terbaru
-    // Jika page > 1, formatnya /page/2/
+    // 1. Coba Tembak API Hugging Face (Home)
+    const apiData = await fetchKomikIndoApi(`${API_KOMIKINDO_HF}/api/komikindo/home/${page}`, logs);
+    if (apiData.length > 0) return apiData;
+
+    // 2. Kalau API gagal, Fallback ke Scraper Manual
     const url = (page == 1) ? `https://komikindo.tv/` : `https://komikindo.tv/page/${page}/`;
     return await scrapeKomikIndo(url, logs, false);
 }
 
+// Fungsi Fetch ke Hugging Face API
+async function fetchKomikIndoApi(url, logs) {
+    try {
+        const res = await fetch(url, { next: { revalidate: 0 } });
+        if (!res.ok) return [];
+        const json = await res.json();
+        
+        // Sesuaikan mapping dengan struktur API HF kamu (biasanya mirip standar)
+        if (json.data && Array.isArray(json.data)) {
+            logs.push(`✅ KomikIndo HF API Success: ${url}`);
+            return json.data.map(item => ({
+                id: item.endpoint || item.id, // Pastikan field ini sesuai
+                title: item.title,
+                image: item.thumb || item.image,
+                chapter: item.chapter || "Ch. ?",
+                score: item.score || "N/A",
+                type: 'komikindo'
+            }));
+        }
+        return [];
+    } catch (e) {
+        // Silent fail, lanjut ke scraper
+        return [];
+    }
+}
+
+// Fungsi Scraper Manual (Cadangan kalau API HF belum siap)
 async function scrapeKomikIndo(url, logs, isSearch) {
     try {
-        logs.push(`Scraping KomikIndo: ${url}`);
+        logs.push(`Using Scraper: ${url}`);
         const res = await fetchSmart(url);
         if (!res.ok) return [];
         
@@ -128,57 +158,31 @@ async function scrapeKomikIndo(url, logs, isSearch) {
         const $ = cheerio.load(html);
         const results = [];
 
-        // --- SELECTOR PENTING ---
-        // Home: .list-update_items .list-update_item (Ini layout update terbaru)
-        // Search: .animepost (Ini layout grid hasil cari)
-        let container;
+        // Gabungkan selector Grid (.animepost) dan List (.list-update_item)
+        const items = $('.animepost, .list-update_item');
         
-        if (isSearch) {
-             container = $('.animepost'); 
-             if (container.length === 0) container = $('.film-list .animepost');
-        } else {
-             // Mode Home: Cari list update dulu
-             container = $('.list-update_items .list-update_item');
-             // Kalau gak nemu, coba cari grid 'menu_index' (Grid update)
-             if (container.length === 0) container = $('.menu_index .animepost');
-             // Fallback terakhir
-             if (container.length === 0) container = $('.animepost');
-        }
+        items.each((i, el) => {
+            if (results.length >= 20) return;
 
-        logs.push(`Items Found: ${container.length}`);
-
-        container.each((i, el) => {
-            // 1. TITLE
-            let title = $(el).find('h4').text().trim();
-            if (!title) title = $(el).find('.title').text().trim();
-
-            // 2. LINK & ID
+            let title = $(el).find('h4').text().trim() || $(el).find('.title').text().trim();
             const link = $(el).find('a').attr('href');
+            let image = $(el).find('img').attr('src');
+            
+            if (image) {
+                if (image.includes('?')) image = image.split('?')[0];
+                if (!image.startsWith('http')) image = `https:${image}`;
+            }
+
+            let chapter = $(el).find('.chapter').first().text().trim();
+            if (!chapter) chapter = $(el).find('.lsch a').first().text().replace("Komik", "").trim();
+            if (!chapter) chapter = "Ch. ?";
+
             let id = '';
             if (link) {
-                // Ambil slug terakhir: https://komikindo.tv/komik/one-piece/ -> one-piece
                 const parts = link.replace(/\/$/, '').split('/');
                 id = parts[parts.length - 1];
             }
 
-            // 3. IMAGE
-            let image = $(el).find('img').attr('src');
-            if (image) {
-                if (image.includes('?')) image = image.split('?')[0]; // Hapus query string
-                if (!image.startsWith('http')) image = `https:${image}`;
-            }
-
-            // 4. CHAPTER (Penting: Home layout beda dengan Search layout)
-            let chapter = "Ch. ?";
-            if (isSearch) {
-                 chapter = $(el).find('.lsch a').text().replace("Komik", "").trim();
-            } else {
-                 // Di Home, biasanya ada class .chapter
-                 chapter = $(el).find('.chapter').first().text().trim();
-                 if (!chapter) chapter = $(el).find('.lsch a').first().text().replace("Komik", "").trim();
-            }
-
-            // Filter
             if (title && id && !title.toLowerCase().includes("apk")) {
                 results.push({
                     id, title, image, chapter, 
@@ -187,15 +191,13 @@ async function scrapeKomikIndo(url, logs, isSearch) {
                 });
             }
         });
-
         return results;
     } catch (e) {
-        logs.push(`🔥 KomikIndo Err: ${e.message}`);
+        logs.push(`🔥 Scrape Err: ${e.message}`);
         return [];
     }
 }
 
-// Helper Proxy
 async function fetchSmart(url) {
     const headers = { "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36" };
     try {
