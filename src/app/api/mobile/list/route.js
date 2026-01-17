@@ -18,24 +18,23 @@ export async function GET(request) {
 
         // --- SKENARIO 1: PENCARIAN (Unified Search) ---
         if (query) {
-            // ... (Bagian Search tetap sama karena sudah benar)
             debugLogs.push("🚀 Mode: Search Paralel");
             const [shinigamiRes, komikindoRes] = await Promise.allSettled([
                 searchShinigami(query, debugLogs),
                 searchKomikIndo(query, debugLogs)
             ]);
+
             if (shinigamiRes.status === 'fulfilled') data = [...data, ...shinigamiRes.value];
             if (komikindoRes.status === 'fulfilled') data = [...data, ...komikindoRes.value];
         } 
-        // --- SKENARIO 2: LIST TERBARU (HOME SCREEN) ---
+        // --- SKENARIO 2: LIST HOME (LATEST) ---
         else {
             debugLogs.push("📜 Mode: List Latest (Home)");
             
             if (source === 'komikindo') {
-                // FIX: Pakai fungsi getKomikIndoLatest (Halaman Home)
                 data = await getKomikIndoLatest(page, debugLogs);
             } else {
-                // FIX: Pakai fungsi getShinigamiLatest (Endpoint Latest)
+                // Default Shinigami
                 data = await getShinigamiLatest(page, debugLogs);
             }
         }
@@ -64,7 +63,6 @@ const COMMON_HEADERS = {
 
 // --- 1. SHINIGAMI ---
 async function searchShinigami(query, logs) {
-    // ... (Kode Search Shinigami Sama Seperti Sebelumnya)
     try {
         const url = `https://api.sansekai.my.id/api/komik/search?query=${encodeURIComponent(query)}`;
         const res = await fetch(url, { headers: COMMON_HEADERS });
@@ -74,41 +72,44 @@ async function searchShinigami(query, logs) {
     } catch (e) { return []; }
 }
 
-// [FIX] Menggunakan Endpoint LATEST bukan POPULAR
 async function getShinigamiLatest(page, logs) {
+    // STRATEGI: Coba Latest dulu, kalau kosong, tembak Popular (Fallback)
     try {
-        // Endpoint 'latest' berisi update chapter terbaru
-        const url = `https://api.sansekai.my.id/api/komik/latest?page=${page}`; 
-        logs.push(`Fetching Shinigami Latest: ${url}`);
-        
-        const res = await fetch(url, { headers: COMMON_HEADERS });
+        logs.push("Trying Shinigami Latest...");
+        const urlLatest = `https://api.sansekai.my.id/api/komik/latest?page=${page}`;
+        const res = await fetch(urlLatest, { headers: COMMON_HEADERS });
         const json = await res.json();
         
-        // Kadang API Sansekai pakai format { data: [...] } kadang { data: { data: [...] } }
-        // Kita antisipasi keduanya
+        // Handle struktur data yang tidak konsisten
         let listData = [];
-        if (json.data && Array.isArray(json.data)) {
-            listData = json.data;
-        } else if (json.data && json.data.data && Array.isArray(json.data.data)) {
-            listData = json.data.data;
-        }
+        if (json.data && Array.isArray(json.data)) listData = json.data;
+        else if (json.data?.data && Array.isArray(json.data.data)) listData = json.data.data;
 
         if (listData.length > 0) {
             logs.push(`✅ Shinigami Latest Found: ${listData.length}`);
             return mapShinigami(listData);
         }
         
-        logs.push(`⚠️ Shinigami Latest Empty`);
+        // JIKA LATEST KOSONG, COBA POPULAR
+        logs.push("⚠️ Shinigami Latest Empty. Trying Popular...");
+        const urlPopular = `https://api.sansekai.my.id/api/komik/popular?page=${page}`;
+        const resPop = await fetch(urlPopular, { headers: COMMON_HEADERS });
+        const jsonPop = await resPop.json();
+        
+        if (jsonPop.data && Array.isArray(jsonPop.data)) {
+            return mapShinigami(jsonPop.data);
+        }
+
         return [];
     } catch (e) { 
-        logs.push(`🔥 Shinigami Latest Error: ${e.message}`);
+        logs.push(`🔥 Shinigami Error: ${e.message}`);
         return []; 
     }
 }
 
 function mapShinigami(data) {
     return data.map(item => ({
-        id: item.manga_id || item.link || item.endpoint, // Handle beda field
+        id: item.manga_id || item.link || item.endpoint, 
         title: item.title,
         image: item.thumbnail || item.image || item.thumb,
         chapter: item.latest_chapter || item.chapter || "Ch. ?",
@@ -119,23 +120,19 @@ function mapShinigami(data) {
 
 // --- 2. KOMIKINDO ---
 async function searchKomikIndo(query, logs) {
-    // ... (Kode Search KomikIndo Sama)
-    return await scrapeKomikIndo(`https://komikindo.tv/?s=${encodeURIComponent(query)}`, logs);
+    // Mode Search: Boleh pakai selector .animepost (tampilan grid)
+    return await scrapeKomikIndo(`https://komikindo.tv/?s=${encodeURIComponent(query)}`, logs, true);
 }
 
-// [FIX] Scraping Halaman UTAMA (Home), bukan Daftar Manga
 async function getKomikIndoLatest(page, logs) {
-    // Halaman 1: https://komikindo.tv/
-    // Halaman 2+: https://komikindo.tv/page/2/
-    const url = (page == 1) 
-        ? `https://komikindo.tv/` 
-        : `https://komikindo.tv/page/${page}/`;
-        
+    const url = (page == 1) ? `https://komikindo.tv/` : `https://komikindo.tv/page/${page}/`;
     logs.push(`Scraping KomikIndo Home: ${url}`);
-    return await scrapeKomikIndo(url, logs);
+    
+    // Mode Home: FALSE (Jangan pakai selector .animepost biasa, harus .list-update_item)
+    return await scrapeKomikIndo(url, logs, false); 
 }
 
-async function scrapeKomikIndo(url, logs) {
+async function scrapeKomikIndo(url, logs, isSearchMode) {
     try {
         const res = await fetchSmart(url);
         if (!res.ok) {
@@ -147,26 +144,51 @@ async function scrapeKomikIndo(url, logs) {
         const $ = cheerio.load(html);
         const results = [];
 
-        // Selector Update (Prioritaskan tampilan Home)
-        let container = $('.list-update_items .list-update_item'); // Biasanya layout Home update
-        if (container.length === 0) container = $('.animepost'); // Layout Search/Archive
-        if (container.length === 0) container = $('.film-list .animepost');
+        // SELECTOR STRATEGY
+        let container;
         
-        logs.push(`KomikIndo Items Found: ${container.length}`);
+        if (isSearchMode) {
+            // Kalau Search, cari grid biasa
+            container = $('.animepost');
+            if (container.length === 0) container = $('.film-list .animepost');
+        } else {
+            // Kalau Home (Latest), WAJIB cari list update terbaru
+            // Selector ini spesifik untuk layout "Update Terbaru" KomikIndo
+            container = $('.list-update_items .list-update_item');
+            
+            // Kalau gak nemu, JANGAN fallback ke .animepost (nanti malah dapat list abjad)
+            if (container.length === 0) {
+                 // Coba selector alternatif untuk layout terbaru jenis lain (Grid Terbaru)
+                 container = $('.menu_index .animepost'); 
+            }
+        }
+        
+        logs.push(`KomikIndo Items Found: ${container.length} (Mode: ${isSearchMode ? 'Search' : 'Home'})`);
 
         container.each((i, el) => {
             let title = $(el).find('h4').text().trim();
             if (!title) title = $(el).find('.title').text().trim();
-            if (!title) title = $(el).find('a').attr('title');
             
             const link = $(el).find('a').attr('href');
             let image = $(el).find('img').attr('src');
+            
             if (image) {
                 if (image.includes('?')) image = image.split('?')[0]; 
                 if (!image.startsWith('http')) image = `https:${image}`;
             }
 
-            const chapter = $(el).find('.chapter').text().trim() || $(el).find('.lsch a').text().replace("Komik", "").trim() || "Ch. ?";
+            // Logic Chapter di Home biasanya beda dengan Search
+            let chapter = "Ch. ?";
+            if (isSearchMode) {
+                 chapter = $(el).find('.lsch a').text().replace("Komik", "").trim();
+            } else {
+                 // Di Home, chapter ada di class .chapter
+                 chapter = $(el).find('.chapter').first().text().trim();
+            }
+
+            // Fallback chapter
+            if (!chapter || chapter === "Ch. ?") chapter = $(el).find('.lsch a').text().replace("Komik", "").trim();
+
             const score = $(el).find('.rating i').text().trim() || "N/A";
 
             let id = '';
