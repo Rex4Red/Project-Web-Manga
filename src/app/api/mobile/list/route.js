@@ -3,92 +3,77 @@ import { NextResponse } from "next/server";
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
-// CONFIG API (Sesuai Screenshot Swagger & Error Kamu)
 const SHINIGAMI_API = "https://api.sansekai.my.id/api";
 const KOMIKINDO_API = "https://rex4red-komik-api-scrape.hf.space";
 
 export async function GET(request) {
-    const debugLogs = []; 
     let data = [];
-    
     try {
         const { searchParams } = new URL(request.url);
         const query = searchParams.get('q');       
         const source = searchParams.get('source');
 
-        // --- 1. MODE SEARCH ---
+        // --- MODE SEARCH ---
         if (query) {
-            // Shinigami Search
-            try {
-                const url = `${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`;
-                const res = await fetch(url, { next: { revalidate: 0 } });
-                const json = await res.json();
-                if (json.data && Array.isArray(json.data)) {
-                     data = [...data, ...mapShinigami(json.data)];
-                }
-            } catch (e) {}
+            const [shinigami, komikindo] = await Promise.allSettled([
+                fetchJson(`${SHINIGAMI_API}/komik/search?query=${query}`),
+                fetchJson(`${KOMIKINDO_API}/komik/search?q=${query}`)
+            ]);
 
-            // KomikIndo Search (API HF)
-            try {
-                const url = `${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`;
-                const res = await fetch(url, { next: { revalidate: 0 } });
-                if (res.ok) {
-                    const json = await res.json();
-                    if (json.data) data = [...data, ...mapKomikIndo(json.data)];
-                }
-            } catch (e) {}
-
+            if (shinigami.status === 'fulfilled' && shinigami.value.data) {
+                data = [...data, ...mapShinigami(shinigami.value.data)];
+            }
+            if (komikindo.status === 'fulfilled' && komikindo.value.data) {
+                data = [...data, ...mapKomikIndo(komikindo.value.data)];
+            }
         } 
-        // --- 2. MODE HOME (LATEST) ---
+        // --- MODE HOME ---
         else {
             if (source === 'komikindo') {
-                // FIX: Pakai endpoint /komik/latest dari API HF
-                const url = `${KOMIKINDO_API}/komik/latest`;
-                try {
-                    const res = await fetch(url, { next: { revalidate: 0 } });
-                    if (res.ok) {
-                        const json = await res.json();
-                        // Handle format {data: [...]} atau [...]
-                        const items = json.data || json; 
-                        if (Array.isArray(items)) data = mapKomikIndo(items);
-                    }
-                } catch (e) {}
-
+                const res = await fetchJson(`${KOMIKINDO_API}/komik/latest`);
+                const items = res.data || res; // Handle beda format
+                if (Array.isArray(items)) data = mapKomikIndo(items);
             } else {
-                // FIX: TAMBAHKAN ?type=project AGAR TIDAK ERROR 400
-                const url = `${SHINIGAMI_API}/komik/latest?type=project`;
-                try {
-                    const res = await fetch(url, { next: { revalidate: 0 } });
-                    const json = await res.json();
-                    
-                    // Handle wrapper data.data (khas Shinigami)
-                    let items = [];
-                    if (json.data && Array.isArray(json.data)) items = json.data;
-                    else if (json.data?.data && Array.isArray(json.data.data)) items = json.data.data;
+                // FIX: WAJIB PAKAI type=project
+                let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
+                
+                // Fallback jika project kosong, coba popular
+                if (!res.data || res.data.length === 0) {
+                    res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+                }
 
-                    if (items.length > 0) data = mapShinigami(items);
-                } catch (e) {}
+                // Handle data wrapper
+                let items = [];
+                if (res.data && Array.isArray(res.data)) items = res.data;
+                else if (res.data?.data && Array.isArray(res.data.data)) items = res.data.data;
+                
+                if (items.length > 0) data = mapShinigami(items);
             }
         }
 
-        return NextResponse.json({ 
-            status: true, 
-            total: data.length,
-            data: data 
-        });
+        return NextResponse.json({ status: true, total: data.length, data });
 
     } catch (error) {
-        return NextResponse.json({ status: false, message: error.message }, { status: 500 });
+        return NextResponse.json({ status: false, message: error.message, data: [] });
     }
 }
 
-// MAPPERS
+// Helper Fetch JSON
+async function fetchJson(url) {
+    try {
+        const res = await fetch(url, { next: { revalidate: 0 } });
+        if (!res.ok) return {};
+        return await res.json();
+    } catch { return {}; }
+}
+
+// Mappers
 function mapShinigami(list) {
     return list.map(item => ({
-        id: item.manga_id || item.endpoint || item.link,
+        id: item.manga_id || item.link,
         title: item.title,
-        image: item.thumbnail || item.image || item.thumb,
-        chapter: item.latest_chapter || item.chapter || "Ch. ?",
+        image: item.thumbnail || item.image,
+        chapter: item.latest_chapter || "Ch. ?",
         score: item.score || "N/A",
         type: 'shinigami'
     }));
