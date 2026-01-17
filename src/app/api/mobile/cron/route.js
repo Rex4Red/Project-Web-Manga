@@ -6,7 +6,7 @@ export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [MOBILE] Cron Job Started (Web-Like Mode)...");
+    console.log("🚀 [MOBILE] Cron Job Started (Parsing Fix)...");
     const startTime = Date.now();
     
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -21,7 +21,6 @@ export async function GET(request) {
     let updatesFound = 0;
 
     try {
-        // 1. Ambil Data Bookmark
         const { data: bookmarks, error } = await supabase.from('bookmarks').select('*');
         if (error) throw error;
         if (!bookmarks || bookmarks.length === 0) return NextResponse.json({ message: "Tidak ada bookmark." });
@@ -31,7 +30,6 @@ export async function GET(request) {
 
         console.log(`Mengecek ${bookmarks.length} komik...`);
 
-        // 2. Proses Batch (3 sekaligus biar ngebut tapi aman)
         const BATCH_SIZE = 3; 
         for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
             if ((Date.now() - startTime) > 50000) {
@@ -57,7 +55,6 @@ export async function GET(request) {
     }
 }
 
-// --- LOGIKA UTAMA (SAMAKAN DENGAN WEB) ---
 async function checkMangaUpdate(item, supabase, allSettings) {
     try {
         let latestChapter = "";
@@ -68,9 +65,7 @@ async function checkMangaUpdate(item, supabase, allSettings) {
         };
 
         if (item.source === 'shinigami') {
-            // --- SHINIGAMI ---
             const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers });
-            
             if (res.ok) {
                 try {
                     const json = await res.json();
@@ -79,7 +74,6 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             }
         } 
         else if (item.source === 'komikindo') {
-            // --- KOMIKINDO ---
             // Bersihkan ID
             let cleanId = item.manga_id;
             if (/^\d+-/.test(cleanId)) cleanId = cleanId.replace(/^\d+-/, '');
@@ -91,40 +85,36 @@ async function checkMangaUpdate(item, supabase, allSettings) {
                 const html = await res.text();
                 const $ = cheerio.load(html);
 
-                // --- TAMBAHAN DEBUGGING (Cek Judul Halaman) ---
-                const pageTitle = $('title').text().trim();
+                // --- PERBAIKAN DI SINI ---
+                // Kita coba BERBAGAI MACAM Selector (ID vs Class, Underscore vs Dash)
+                // Agar tidak salah tebak lagi.
                 
-                // Cek apakah halaman valid
-                if (!html.includes('chapter-list')) {
-                    // Kalau kena Cloudflare
-                    if (html.includes('Just a moment')) return `⚠️ SKIP [${item.title}]: Kena Cloudflare/Captcha`;
-                    
-                    // Kalau nyasar ke Home atau 404 soft
-                    return `⚠️ SKIP [${item.title}]: Salah Halaman? (Judul: ${pageTitle})`; 
-                }
+                let rawText = $('#chapter_list .lchx a').first().text();       // Selector 1 (Paling umum)
+                if (!rawText) rawText = $('.chapter-list li:first-child a').text(); // Selector 2
+                if (!rawText) rawText = $('#chapter_list li:first-child a').text(); // Selector 3
+                if (!rawText) rawText = $('.lchx a').first().text();                // Selector 4 (Cadangan)
 
-                let rawText = $('#chapter_list .lchx a').first().text();
-                if (!rawText) rawText = $('.chapter-list li:first-child a').text();
-                
-                if (rawText) latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
+                if (rawText) {
+                    latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
+                } else {
+                     // Kalau semua selector gagal, baru kita nyerah
+                     const pageTitle = $('title').text().trim();
+                     if (html.includes('Just a moment')) return `⚠️ SKIP [${item.title}]: Kena Cloudflare`;
+                     return `⚠️ SKIP [${item.title}]: Gagal Parsing Chapter (Judul: ${pageTitle})`; 
+                }
             } else {
                 return `⚠️ SKIP [${item.title}]: HTTP ${res.status}`;
             }
         }
-        
 
-        // --- CEK UPDATE & NOTIFIKASI ---
         if (latestChapter && latestChapter !== item.last_chapter) {
-            // Normalisasi angka untuk perbandingan (biar "Ch. 10" == "Chapter 10")
             const cleanOld = item.last_chapter ? item.last_chapter.replace(/[^0-9.]/g, '') : "0";
             const cleanNew = latestChapter.replace(/[^0-9.]/g, '');
             
             if (cleanOld === cleanNew && item.last_chapter !== null) return null;
 
-            // 1. Update Database
             await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
 
-            // 2. Kirim Notif (Cek settingan user)
             const userSetting = allSettings.find(s => s.user_id === item.user_id);
             if (userSetting) {
                 if (userSetting.discord_webhook) sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover);
@@ -139,22 +129,18 @@ async function checkMangaUpdate(item, supabase, allSettings) {
     }
 }
 
-// --- FETCH PINTAR (Sama persis dengan Web) ---
 async function fetchSmart(url, options = {}) {
-    // 1. Coba Direct (Cepat)
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(5000) });
         if (res.ok) return res;
-    } catch (e) { /* Lanjut */ }
+    } catch (e) { }
 
-    // 2. Coba Proxy 1 (CorsProxy - Andalan Scraping)
     try {
         const proxy1 = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         const res = await fetch(proxy1, { ...options, signal: AbortSignal.timeout(8000) });
         if (res.ok) return res;
-    } catch (e) { /* Lanjut */ }
+    } catch (e) { }
 
-    // 3. Coba Proxy 2 (AllOrigins - Cadangan)
     try {
         const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
         const res = await fetch(proxy2, { ...options, signal: AbortSignal.timeout(8000) });
@@ -164,7 +150,6 @@ async function fetchSmart(url, options = {}) {
     }
 }
 
-// --- HELPER NOTIFIKASI ---
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     try {
         await fetch(webhookUrl, {
