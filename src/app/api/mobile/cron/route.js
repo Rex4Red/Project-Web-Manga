@@ -80,26 +80,29 @@ async function checkMangaUpdate(item, supabase, allSettings) {
         } 
         else if (item.source === 'komikindo') {
             // --- KOMIKINDO ---
-            // 1. Paksakan pakai domain .tv (lebih stabil di proxy)
-            // 2. Bersihkan ID: Kalau ID-nya "123-judul", kita ambil "judul" saja agar tidak 404 di KomikIndo
+            // Bersihkan ID
             let cleanId = item.manga_id;
-            if (/^\d+-/.test(cleanId)) {
-                cleanId = cleanId.replace(/^\d+-/, ''); // Hapus angka di depan jika ada
-            }
+            if (/^\d+-/.test(cleanId)) cleanId = cleanId.replace(/^\d+-/, '');
 
             const targetUrl = `https://komikindo.tv/komik/${cleanId}/`; 
             const res = await fetchSmart(targetUrl, { headers });
             
             if (res.ok) {
                 const html = await res.text();
-                // Validasi apakah HTML valid atau halaman error
+                const $ = cheerio.load(html);
+
+                // --- TAMBAHAN DEBUGGING (Cek Judul Halaman) ---
+                const pageTitle = $('title').text().trim();
+                
+                // Cek apakah halaman valid
                 if (!html.includes('chapter-list')) {
-                    // Coba cek apakah kena Cloudflare
-                    if (html.includes('Just a moment')) return `⚠️ SKIP [${item.title}]: Kena Cloudflare`;
-                    return `⚠️ SKIP [${item.title}]: Struktur Web Berbeda/404`;
+                    // Kalau kena Cloudflare
+                    if (html.includes('Just a moment')) return `⚠️ SKIP [${item.title}]: Kena Cloudflare/Captcha`;
+                    
+                    // Kalau nyasar ke Home atau 404 soft
+                    return `⚠️ SKIP [${item.title}]: Salah Halaman? (Judul: ${pageTitle})`; 
                 }
 
-                const $ = cheerio.load(html);
                 let rawText = $('#chapter_list .lchx a').first().text();
                 if (!rawText) rawText = $('.chapter-list li:first-child a').text();
                 
@@ -108,6 +111,7 @@ async function checkMangaUpdate(item, supabase, allSettings) {
                 return `⚠️ SKIP [${item.title}]: HTTP ${res.status}`;
             }
         }
+        
 
         // --- CEK UPDATE & NOTIFIKASI ---
         if (latestChapter && latestChapter !== item.last_chapter) {
