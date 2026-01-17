@@ -6,7 +6,7 @@ export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [MOBILE] Cron Job Started...");
+    console.log("🚀 [MOBILE] Cron Job Started (Smart Mode)...");
     const startTime = Date.now();
     
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -21,28 +21,18 @@ export async function GET(request) {
     let updatesFound = 0;
 
     try {
-        // 1. Ambil SEMUA data bookmark dulu
-        const { data: bookmarks, error } = await supabase
-            .from('bookmarks')
-            .select('*'); // Ambil mentahan dulu, jangan join dulu biar gak error
-
+        // 1. Ambil Data
+        const { data: bookmarks, error } = await supabase.from('bookmarks').select('*');
         if (error) throw error;
         if (!bookmarks || bookmarks.length === 0) return NextResponse.json({ message: "Tidak ada bookmark." });
 
-        // 2. Ambil User ID unik dari daftar bookmark tadi
         const userIds = [...new Set(bookmarks.map(b => b.user_id))];
-
-        // 3. Ambil Settingan Notifikasi untuk user-user tersebut (Manual Fetch)
-        const { data: settingsData } = await supabase
-            .from('user_settings')
-            .select('*')
-            .in('user_id', userIds);
+        const { data: settingsData } = await supabase.from('user_settings').select('*').in('user_id', userIds);
 
         console.log(`Mengecek ${bookmarks.length} komik...`);
 
-        // 4. Proses Batch
+        // 2. Proses Batch (3 sekaligus)
         const BATCH_SIZE = 3; 
-        
         for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
             if ((Date.now() - startTime) > 50000) {
                 logs.push("⚠️ FORCE STOP: Waktu habis.");
@@ -50,8 +40,6 @@ export async function GET(request) {
             }
 
             const batch = bookmarks.slice(i, i + BATCH_SIZE);
-            
-            // Kita oper 'settingsData' ke fungsi check agar bisa dicocokkan
             const results = await Promise.all(batch.map(item => checkMangaUpdate(item, supabase, settingsData)));
 
             results.forEach(res => {
@@ -59,18 +47,13 @@ export async function GET(request) {
                 if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            if (i + BATCH_SIZE < bookmarks.length) await new Promise(r => setTimeout(r, 1000));
+            // Istirahat 1.5 detik biar proxy gak ngamuk
+            if (i + BATCH_SIZE < bookmarks.length) await new Promise(r => setTimeout(r, 1500));
         }
 
-        return NextResponse.json({
-            status: "Selesai",
-            total_checked: bookmarks.length,
-            updates_found: updatesFound,
-            logs
-        });
+        return NextResponse.json({ status: "Selesai", checked: bookmarks.length, updates: updatesFound, logs });
 
     } catch (error) {
-        console.error("Cron Error:", error);
         return NextResponse.json({ status: false, error: error.message }, { status: 500 });
     }
 }
@@ -79,64 +62,99 @@ export async function GET(request) {
 async function checkMangaUpdate(item, supabase, allSettings) {
     try {
         let latestChapter = "";
+        
+        // Header samaran HP Android
         const headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
             "Referer": "https://google.com",
         };
 
-        // 1. Cek Sumber (Shinigami / KomikIndo)
         if (item.source === 'shinigami') {
-            const res = await fetch(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { next: { revalidate: 0 }, headers });
+            // API Shinigami (Biasanya cepat)
+            const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers });
             if (res.ok) {
                 const json = await res.json();
-                if (json.data?.latest_chapter_number) {
-                    latestChapter = `Chapter ${json.data.latest_chapter_number}`;
-                }
+                if (json.data?.latest_chapter_number) latestChapter = `Chapter ${json.data.latest_chapter_number}`;
             }
         } else if (item.source === 'komikindo') {
-            const targetUrl = `https://komikindo.tv/komik/${item.manga_id}/`;
-            const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
-            const res = await fetch(proxyUrl, { next: { revalidate: 0 } });
+            // SCRAPING KomikIndo (Rawan Blokir/Lemot)
+            // Kita coba domain .ch karena itu yg ada di DB kamu, atau fallback ke .tv
+            const targetUrl = `https://komikindo.ch/komik/${item.manga_id}/`; 
+            
+            const res = await fetchSmart(targetUrl, { headers });
+            
             if (res.ok) {
-                const json = await res.json();
-                if (json.contents) {
-                    const $ = cheerio.load(json.contents);
+                const html = await res.text();
+                // Validasi HTML dikit biar gak error parsing
+                if (html && html.includes('chapter-list')) {
+                    const $ = cheerio.load(html);
                     let rawText = $('#chapter_list .lchx a').first().text();
                     if (!rawText) rawText = $('.chapter-list li:first-child a').text();
                     if (rawText) latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
+                } else {
+                     return `⚠️ SKIP [${item.title}]: Gagal Parsing HTML`;
                 }
+            } else {
+                return `⚠️ SKIP [${item.title}]: Gagal Load URL (${res.status})`;
             }
         }
 
-        // 2. Bandingkan Chapter
+        // --- CEK UPDATE ---
         if (latestChapter && latestChapter !== item.last_chapter) {
-            // Update Database
-            await supabase
-                .from('bookmarks')
-                .update({ last_chapter: latestChapter })
-                .eq('id', item.id);
-
-            // 3. Cari Settingan User ini (Manual Match dari array)
-            // KITA CARI SETTINGANNYA DI SINI (MANUAL JOIN)
-            const userSetting = allSettings.find(s => s.user_id === item.user_id);
+            // Cek apakah cuma beda spasi/format
+            const cleanOld = item.last_chapter ? item.last_chapter.replace(/[^0-9.]/g, '') : "0";
+            const cleanNew = latestChapter.replace(/[^0-9.]/g, '');
             
-            if (userSetting) {
-                if (userSetting.discord_webhook) {
-                    sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover);
-                }
-                if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
-                    sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover);
-                }
-            }
+            // Kalau angkanya sama, jangan update (misal: "Chapter 10" vs "Ch 10")
+            if (cleanOld === cleanNew && item.last_chapter !== null) return null;
 
+            // 1. Update Database
+            await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
+
+            // 2. Notifikasi
+            const userSetting = allSettings.find(s => s.user_id === item.user_id);
+            if (userSetting) {
+                if (userSetting.discord_webhook) sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover);
+                if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover);
+            }
             return `✅ UPDATE [${item.title}]: ${latestChapter}`;
         }
         return null; 
+
     } catch (e) {
         return `❌ ERROR [${item.title}]: ${e.message}`;
     }
 }
 
+// --- FUNGSI SAKTI: FETCH PINTAR (MULTI-PROXY) ---
+// Ini yang bikin anti-terminated. Dia coba 3 jalur berbeda.
+async function fetchSmart(url, options = {}) {
+    const timeout = 6000; // 6 Detik Timeout per percobaan
+
+    // Jalur 1: CorsProxy.io (Biasanya paling kencang buat scraping)
+    try {
+        const proxy1 = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+        const res = await fetch(proxy1, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(timeout) });
+        if (res.ok) return res;
+    } catch (e) { /* Lanjut */ }
+
+    // Jalur 2: Direct (Langsung) - Kadang API Shinigami bisa ditembak langsung
+    try {
+        const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(timeout) });
+        if (res.ok) return res;
+    } catch (e) { /* Lanjut */ }
+
+    // Jalur 3: AllOrigins (Cadangan terakhir)
+    try {
+        const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+        const res = await fetch(proxy2, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(timeout) });
+        return res; 
+    } catch (e) {
+        throw new Error("Semua proxy gagal/timeout.");
+    }
+}
+
+// --- HELPER NOTIFIKASI ---
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     try {
         await fetch(webhookUrl, {
@@ -144,16 +162,10 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 username: "Rex4Red Mobile",
-                embeds: [{
-                    title: "🚨 Chapter Baru Rilis!",
-                    description: `**${title}**\n${chapter}`,
-                    color: 5763719,
-                    image: { url: cover },
-                    footer: { text: "Rex4Red Mobile App" }
-                }]
+                embeds: [{ title: "🚨 Chapter Baru!", description: `**${title}**\n${chapter}`, color: 5763719, image: { url: cover } }]
             })
         });
-    } catch (e) { console.error("Discord Fail", e); }
+    } catch (e) {}
 }
 
 async function sendTelegram(token, chatId, title, chapter, cover) {
@@ -164,12 +176,6 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ chat_id: chatId, photo: cover, caption: text, parse_mode: 'Markdown' })
         });
-        if (!res.ok) {
-            await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' })
-            });
-        }
-    } catch (e) { console.error("Telegram Fail", e); }
+        if (!res.ok) await fetch(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }) });
+    } catch (e) {}
 }
