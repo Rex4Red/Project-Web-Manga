@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from 'cheerio';
 
-// Supaya Vercel tidak mematikan proses terlalu cepat (Max 60 detik)
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
@@ -10,66 +9,57 @@ export async function GET(request) {
     console.log("🚀 [MOBILE] Cron Job Started...");
     const startTime = Date.now();
     
-    // --- PERBAIKAN DI SINI ---
-    // Kita pindahkan inisialisasi ke dalam fungsi agar tidak error saat Build Time
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 
-    // Cek Environment Variable saat Runtime (saat jalan), bukan saat Build
     if (!supabaseUrl || !supabaseKey) {
-        console.error("❌ CRITICAL: Missing Supabase Credentials");
-        return NextResponse.json({ 
-            status: false, 
-            error: "Missing Supabase URL or Service Role Key. Check Vercel Environment Variables." 
-        }, { status: 500 });
+        return NextResponse.json({ status: false, error: "Missing Env Variables" }, { status: 500 });
     }
 
-    // Inisialisasi Client
     const supabase = createClient(supabaseUrl, supabaseKey);
-    // -------------------------
-
     const logs = [];
     let updatesFound = 0;
 
     try {
-        // 2. Ambil semua bookmark + settingan notifikasi usernya
+        // 1. Ambil SEMUA data bookmark dulu
         const { data: bookmarks, error } = await supabase
             .from('bookmarks')
-            .select(`
-                *,
-                user_settings (
-                    discord_webhook,
-                    telegram_bot_token,
-                    telegram_chat_id
-                )
-            `);
+            .select('*'); // Ambil mentahan dulu, jangan join dulu biar gak error
 
         if (error) throw error;
         if (!bookmarks || bookmarks.length === 0) return NextResponse.json({ message: "Tidak ada bookmark." });
 
+        // 2. Ambil User ID unik dari daftar bookmark tadi
+        const userIds = [...new Set(bookmarks.map(b => b.user_id))];
+
+        // 3. Ambil Settingan Notifikasi untuk user-user tersebut (Manual Fetch)
+        const { data: settingsData } = await supabase
+            .from('user_settings')
+            .select('*')
+            .in('user_id', userIds);
+
         console.log(`Mengecek ${bookmarks.length} komik...`);
 
-        // 3. Proses per Batch (Agar tidak time out)
+        // 4. Proses Batch
         const BATCH_SIZE = 3; 
         
         for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
-            // Rem Darurat
             if ((Date.now() - startTime) > 50000) {
                 logs.push("⚠️ FORCE STOP: Waktu habis.");
                 break;
             }
 
             const batch = bookmarks.slice(i, i + BATCH_SIZE);
-            const results = await Promise.all(batch.map(item => checkMangaUpdate(item, supabase)));
+            
+            // Kita oper 'settingsData' ke fungsi check agar bisa dicocokkan
+            const results = await Promise.all(batch.map(item => checkMangaUpdate(item, supabase, settingsData)));
 
             results.forEach(res => {
                 if (res) logs.push(res);
                 if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            if (i + BATCH_SIZE < bookmarks.length) {
-                await new Promise(r => setTimeout(r, 1000));
-            }
+            if (i + BATCH_SIZE < bookmarks.length) await new Promise(r => setTimeout(r, 1000));
         }
 
         return NextResponse.json({
@@ -86,8 +76,7 @@ export async function GET(request) {
 }
 
 // --- LOGIKA UTAMA ---
-// Kita perlu oper 'supabase' client ke fungsi ini karena sekarang dia dibuat di dalam GET
-async function checkMangaUpdate(item, supabase) {
+async function checkMangaUpdate(item, supabase, allSettings) {
     try {
         let latestChapter = "";
         const headers = {
@@ -95,6 +84,7 @@ async function checkMangaUpdate(item, supabase) {
             "Referer": "https://google.com",
         };
 
+        // 1. Cek Sumber (Shinigami / KomikIndo)
         if (item.source === 'shinigami') {
             const res = await fetch(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { next: { revalidate: 0 }, headers });
             if (res.ok) {
@@ -118,17 +108,27 @@ async function checkMangaUpdate(item, supabase) {
             }
         }
 
+        // 2. Bandingkan Chapter
         if (latestChapter && latestChapter !== item.last_chapter) {
+            // Update Database
             await supabase
                 .from('bookmarks')
                 .update({ last_chapter: latestChapter })
                 .eq('id', item.id);
 
-            const settings = item.user_settings; 
-            if (settings) {
-                if (settings.discord_webhook) sendDiscord(settings.discord_webhook, item.title, latestChapter, item.cover);
-                if (settings.telegram_bot_token && settings.telegram_chat_id) sendTelegram(settings.telegram_bot_token, settings.telegram_chat_id, item.title, latestChapter, item.cover);
+            // 3. Cari Settingan User ini (Manual Match dari array)
+            // KITA CARI SETTINGANNYA DI SINI (MANUAL JOIN)
+            const userSetting = allSettings.find(s => s.user_id === item.user_id);
+            
+            if (userSetting) {
+                if (userSetting.discord_webhook) {
+                    sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover);
+                }
+                if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
+                    sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover);
+                }
             }
+
             return `✅ UPDATE [${item.title}]: ${latestChapter}`;
         }
         return null; 
