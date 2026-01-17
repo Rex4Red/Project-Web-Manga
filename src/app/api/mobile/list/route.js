@@ -31,18 +31,19 @@ export async function GET(request) {
         // --- MODE HOME (LATEST) ---
         else {
             if (source === 'komikindo') {
+                // Endpoint KomikIndo
                 const res = await fetchJson(`${KOMIKINDO_API}/komik/latest`);
                 const items = res.data || res;
                 if (Array.isArray(items)) data = mapKomikIndo(items);
             } else {
-                // FIX: Shinigami WAJIB pakai type=project
+                // Endpoint Shinigami (Pakai Project, kalau kosong pakai Popular)
                 let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
-                
-                // Fallback ke Popular jika Project kosong
-                if (!res.data) res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+                if (!res.data || res.data.length === 0) {
+                    res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+                }
 
+                // Handle berbagai struktur data Shinigami
                 let items = [];
-                // Handle struktur data yang aneh-aneh
                 if (Array.isArray(res.data)) items = res.data;
                 else if (res.data?.data && Array.isArray(res.data.data)) items = res.data.data;
 
@@ -59,31 +60,50 @@ export async function GET(request) {
 
 async function fetchJson(url) {
     try {
-        const res = await fetch(url, { next: { revalidate: 0 } });
+        const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, next: { revalidate: 0 } });
         return res.ok ? await res.json() : {};
     } catch { return {}; }
 }
 
-// MAPPER YANG LEBIH PINTAR (Cek semua kemungkinan field gambar)
+// --- MAPPER SUPER AGRESIF (Cari di semua lubang) ---
+
 function mapShinigami(list) {
-    return list.map(item => ({
-        id: item.manga_id || item.link || item.endpoint,
-        title: item.title,
-        // Cek 'thumbnail', lalu 'image', lalu 'thumb', lalu 'cover'
-        image: item.thumbnail || item.image || item.thumb || item.cover || "",
-        chapter: item.latest_chapter || item.chapter || "Ch. ?",
-        score: item.score || "N/A",
-        type: 'shinigami'
-    }));
+    return list.map(item => {
+        // Cari gambar di berbagai key
+        let img = item.thumbnail || item.image || item.thumb || item.cover || "";
+        
+        // Cari chapter di berbagai key
+        let ch = item.latest_chapter || item.chapter || item.last_chapter || "Ch. ?";
+
+        return {
+            id: item.manga_id || item.link || item.endpoint,
+            title: item.title,
+            image: img,
+            chapter: ch,
+            score: item.score || "N/A",
+            type: 'shinigami'
+        };
+    });
 }
 
 function mapKomikIndo(list) {
-    return list.map(item => ({
-        id: item.endpoint || item.id || item.link,
-        title: item.title,
-        image: item.thumb || item.image || item.thumbnail,
-        chapter: item.chapter || item.latest_chapter || "Ch. ?",
-        score: item.score || "N/A",
-        type: 'komikindo'
-    }));
+    return list.map(item => {
+        // KomikIndo kadang pakai 'thumb', kadang 'image'
+        let img = item.thumb || item.image || item.thumbnail || "";
+        
+        // KomikIndo kadang 'chapter', kadang 'upload_on' berisi chapter
+        let ch = item.chapter || item.latest_chapter || "Ch. ?";
+
+        // Fix URL Gambar KomikIndo yang kadang ada query string aneh
+        if (img && img.includes('?')) img = img.split('?')[0];
+
+        return {
+            id: item.endpoint || item.id || item.link,
+            title: item.title,
+            image: img,
+            chapter: ch,
+            score: item.score || "N/A",
+            type: 'komikindo'
+        };
+    });
 }
