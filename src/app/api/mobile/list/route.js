@@ -66,35 +66,54 @@ async function fetchJson(url) {
 }
 
 // 🔥 MAPPER FINAL (SUDAH DISESUAIKAN DENGAN CODE WEB) 🔥
+// ... (Bagian atas biarkan sama)
+
+// 🔥 MAPPER SHINIGAMI DIPERBAIKI (Chapter Fix) 🔥
 function mapShinigami(list) {
     return list.map(item => {
-        // Kita cek field yang dipakai di Web React kamu:
+        // Gambar (Sudah OK, jangan diubah)
         const possibleImages = [
-            item.cover_portrait_url, // INI KUNCI UTAMANYA!
-            item.cover_image_url,    // Cadangan 1
+            item.cover_portrait_url, 
+            item.cover_image_url,    
             item.thumbnail,
             item.image,
             item.thumb,
             item.cover,
             item.img
         ];
-
-        // Ambil yang pertama kali TIDAK kosong
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
 
-        // Cek chapter
-        const finalChapter = item.latest_chapter_text || item.latest_chapter || item.chapter || "Ch. ?";
+        // Chapter (Kita tambahkan buruan baru)
+        const possibleChapters = [
+            item.latest_chapter_text, // <-- INI YANG SERING DIPAKAI DI WEB
+            item.latest_chapter, 
+            item.chapter, 
+            item.last_chapter,
+            item.chap,
+            item.eps
+        ];
+        
+        // Ambil chapter yang valid, kalau tidak ada pakai "Ch. ?"
+        let finalChapter = possibleChapters.find(ch => ch && ch.toString().length > 0) || "Ch. ?";
+
+        // Bersihkan teks chapter biar rapi (opsional)
+        // Misal: "Chapter 31" -> "Ch. 31"
+        if (finalChapter.toLowerCase().includes("chapter")) {
+            finalChapter = finalChapter.replace(/chapter/i, "Ch.");
+        }
 
         return {
             id: item.manga_id || item.link || item.endpoint,
             title: item.title,
             image: finalImage,
             chapter: finalChapter,
-            score: item.score || item.user_rate || "N/A", // Tambahkan user_rate juga
+            score: item.score || item.user_rate || "N/A", 
             type: 'shinigami'
         };
     });
 }
+
+// ... (Bagian mapKomikIndo biarkan sama)
 
 function mapKomikIndo(list) {
     return list.map(item => {
