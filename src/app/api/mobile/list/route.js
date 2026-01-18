@@ -65,10 +65,10 @@ async function fetchJson(url) {
     } catch { return {}; }
 }
 
-// 🔥 MAPPER SHINIGAMI DIPERBAIKI (Chapter & Image) 🔥
+// 🔥 MAPPER SHINIGAMI UPDATE (FIX CHAPTER) 🔥
 function mapShinigami(list) {
     return list.map(item => {
-        // --- GAMBAR ---
+        // 1. LOGIKA GAMBAR (Sudah OK)
         const possibleImages = [
             item.cover_portrait_url, 
             item.cover_image_url,    
@@ -80,26 +80,27 @@ function mapShinigami(list) {
         ];
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
 
-        // --- CHAPTER ---
-        // Kita cek field-field ini secara berurutan
-        const possibleChapters = [
-            item.latest_chapter_text, // Prioritas 1 (sering dipakai di web)
-            item.latest_chapter,      // Prioritas 2
-            item.chapter,             // Prioritas 3
-            item.last_chapter,
-            item.chap,
-            item.eps
-        ];
-        
-        // Ambil chapter pertama yang valid (tidak null/undefined dan bukan string kosong)
-        let finalChapter = possibleChapters.find(ch => ch && ch.toString().trim().length > 0) || "Ch. ?";
+        // 2. LOGIKA CHAPTER (DIPERBAIKI)
+        let finalChapter = "Ch. ?";
 
-        // Bersihkan teks chapter agar lebih rapi (Opsional)
-        // Contoh: "Chapter 31" -> "Ch. 31"
-        if (finalChapter !== "Ch. ?" && typeof finalChapter === 'string') {
-             if (finalChapter.toLowerCase().includes("chapter")) {
-                finalChapter = finalChapter.replace(/chapter/gi, "Ch.").trim();
-             }
+        if (item.latest_chapter_text && item.latest_chapter_text !== "") {
+            // Prioritas 1: Teks Chapter lengkap (misal "Chapter 35")
+            finalChapter = item.latest_chapter_text;
+        } else if (item.latest_chapter_number) {
+            // Prioritas 2: Angka Chapter (misal 35) -> Kita tambah "Ch."
+            finalChapter = "Ch. " + item.latest_chapter_number;
+        } else if (item.latest_chapter) {
+            finalChapter = item.latest_chapter;
+        } else if (item.chapter) {
+            finalChapter = item.chapter;
+        } else if (item.lastChapter) { // Perhatikan camelCase!
+            finalChapter = item.lastChapter;
+        }
+
+        // 3. FORMATTING (Rapikan teks)
+        // Ubah "Chapter 35" menjadi "Ch. 35" biar hemat tempat
+        if (String(finalChapter).toLowerCase().includes("chapter")) {
+            finalChapter = String(finalChapter).replace(/chapter/gi, "Ch.").trim();
         }
 
         return {
@@ -113,6 +114,7 @@ function mapShinigami(list) {
     });
 }
 
+// Mapper KomikIndo (Tidak Berubah)
 function mapKomikIndo(list) {
     return list.map(item => {
         let img = item.thumb || item.image || item.thumbnail || "";
