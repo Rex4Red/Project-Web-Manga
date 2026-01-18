@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 
-// Kita tidak pakai force-dynamic global agar revalidate berfungsi per-request
 export const maxDuration = 60; 
 
 const SHINIGAMI_API = "https://api.sansekai.my.id/api";
@@ -18,7 +17,6 @@ export async function GET(request) {
 
         // --- 1. MODE SEARCH ---
         if (query) {
-            // Search boleh di-cache agak lama (1 jam) karena hasil search jarang berubah
             const [shinigami, komikindo] = await Promise.allSettled([
                 fetchWithCache(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`, 3600),
                 fetchWithCache(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`, 3600)
@@ -35,35 +33,35 @@ export async function GET(request) {
         } 
         // --- 2. MODE HOME ---
         else {
-            // === KOMIKINDO ===
             if (source === 'komikindo') {
                 const res = await fetchWithCache(`${KOMIKINDO_API}/komik/latest`, 300); 
                 const items = extractData(res);
                 if (items.length > 0) data = mapKomikIndo(items);
             } 
-            // === SHINIGAMI (Cache Disesuaikan) ===
             else {
                 let res = {};
                 const selectedType = type || 'project'; 
                 
-                // --- A. REKOMENDASI ---
+                // --- A. REKOMENDASI (FIX FILTERING) ---
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
                     
-                    // Recommended/Popular jarang berubah, cache 30 menit (1800 detik) aman
-                    res = await fetchWithCache(`${SHINIGAMI_API}/komik/popular?type=${recType}`, 1800); 
+                    // Prioritas 1: Recommended Asli (Sering kosong, tapi kalau ada paling bagus)
+                    res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, 1800);
                     
+                    // Prioritas 2: List Popular per Tipe (INI YANG BENAR UNTUK FILTER)
+                    // Endpoint /list?type=...&order=popular DIJAMIN sesuai tipe
                     if (isDataEmpty(res)) {
-                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, 1800);
+                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`, 1800);
                     }
+                    
+                    // Prioritas 3: List Update per Tipe (Fallback terakhir)
                     if (isDataEmpty(res)) {
                         res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`, 300);
                     }
                 } 
-                // --- B. LATEST UPDATE (INI YANG KRUSIAL) ---
+                // --- B. LATEST UPDATE ---
                 else {
-                    // Cache diturunkan jadi 90 detik (1.5 menit).
-                    // Cukup cepat untuk update chapter, cukup lama untuk cegah blokir.
                     res = await fetchWithCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`, 90);
                     
                     if (isDataEmpty(res)) {
@@ -88,7 +86,8 @@ export async function GET(request) {
     }
 }
 
-// ... (Bagian Helper extractData dan isDataEmpty biarkan sama) ...
+// ... (SISA KODE KE BAWAH TETAP SAMA: isDataEmpty, extractData, fetchWithCache, Mappers)
+// Pastikan copy function helper di bawah ini juga agar file lengkap
 
 function isDataEmpty(res) {
     if (!res) return true;
@@ -106,19 +105,15 @@ function extractData(res) {
     return [];
 }
 
-// 🔥 FUNGSI FETCH DENGAN CACHE PINTAR 🔥
 async function fetchWithCache(url, cacheTime) {
-    // Jalur 1: Direct
     let res = await tryFetch(url, cacheTime);
     if (!isDataEmpty(res)) return res;
 
-    // Jalur 2: Proxy 1 (Cache dipersingkat di proxy agar cepat pulih kalau error)
     console.log("⚠️ Direct fail, trying Proxy 1...");
     const proxy1 = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
     res = await tryFetch(proxy1, 60); 
     if (!isDataEmpty(res)) return res;
 
-    // Jalur 3: Proxy 2
     console.log("⚠️ Proxy 1 fail, trying Proxy 2...");
     const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
     res = await tryFetch(proxy2, 60);
@@ -136,7 +131,6 @@ async function tryFetch(url, revalidateSeconds) {
             headers: { 
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }, 
-            // Cache dikontrol lewat parameter
             next: { revalidate: revalidateSeconds } 
         });
         
@@ -153,7 +147,6 @@ async function tryFetch(url, revalidateSeconds) {
     }
 }
 
-// ... (Mapper Shinigami & KomikIndo TETAP SAMA seperti sebelumnya) ...
 function mapShinigami(list) {
     return list.map(item => {
         const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
