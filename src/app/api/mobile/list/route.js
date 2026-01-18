@@ -35,8 +35,10 @@ export async function GET(request) {
                 const items = res.data || res;
                 if (Array.isArray(items)) data = mapKomikIndo(items);
             } else {
-                // Shinigami
+                // Shinigami Latest
                 let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
+                
+                // Fallback Popular
                 if (!res.data || res.data.length === 0) {
                     res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
                 }
@@ -63,32 +65,32 @@ async function fetchJson(url) {
     } catch { return {}; }
 }
 
-// 🔥 MAPPER SUPER AGRESIF (SOLUSI FINAL) 🔥
+// 🔥 MAPPER FINAL (SUDAH DISESUAIKAN DENGAN CODE WEB) 🔥
 function mapShinigami(list) {
     return list.map(item => {
-        // Cek semua kemungkinan nama field gambar dari API
+        // Kita cek field yang dipakai di Web React kamu:
         const possibleImages = [
-            item.thumbnail,  // Biasa
-            item.image,      // Alternatif 1
-            item.thumb,      // Alternatif 2
-            item.cover,      // Alternatif 3
-            item.img,        // Alternatif 4
-            item.url,        // Alternatif 5
-            item.poster      // Alternatif 6
+            item.cover_portrait_url, // INI KUNCI UTAMANYA!
+            item.cover_image_url,    // Cadangan 1
+            item.thumbnail,
+            item.image,
+            item.thumb,
+            item.cover,
+            item.img
         ];
 
         // Ambil yang pertama kali TIDAK kosong
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
 
-        // Cek chapter juga
-        const finalChapter = item.latest_chapter || item.chapter || item.last_chapter || "Ch. ?";
+        // Cek chapter
+        const finalChapter = item.latest_chapter_text || item.latest_chapter || item.chapter || "Ch. ?";
 
         return {
             id: item.manga_id || item.link || item.endpoint,
             title: item.title,
             image: finalImage,
             chapter: finalChapter,
-            score: item.score || "N/A",
+            score: item.score || item.user_rate || "N/A", // Tambahkan user_rate juga
             type: 'shinigami'
         };
     });
