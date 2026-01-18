@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
-export const maxDuration = 60; // Durasi maksimal eksekusi (detik)
-export const dynamic = 'force-dynamic';
+// Kita tidak pakai force-dynamic global agar revalidate berfungsi per-request
+export const maxDuration = 60; 
 
 const SHINIGAMI_API = "https://api.sansekai.my.id/api";
 const KOMIKINDO_API = "https://rex4red-komik-api-scrape.hf.space";
@@ -18,9 +18,10 @@ export async function GET(request) {
 
         // --- 1. MODE SEARCH ---
         if (query) {
+            // Search boleh di-cache agak lama (1 jam) karena hasil search jarang berubah
             const [shinigami, komikindo] = await Promise.allSettled([
-                fetchWithFallback(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
-                fetchWithFallback(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
+                fetchWithCache(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`, 3600),
+                fetchWithCache(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`, 3600)
             ]);
 
             if (shinigami.status === 'fulfilled') {
@@ -36,11 +37,11 @@ export async function GET(request) {
         else {
             // === KOMIKINDO ===
             if (source === 'komikindo') {
-                const res = await fetchWithFallback(`${KOMIKINDO_API}/komik/latest`);
+                const res = await fetchWithCache(`${KOMIKINDO_API}/komik/latest`, 300); 
                 const items = extractData(res);
                 if (items.length > 0) data = mapKomikIndo(items);
             } 
-            // === SHINIGAMI ===
+            // === SHINIGAMI (Cache Disesuaikan) ===
             else {
                 let res = {};
                 const selectedType = type || 'project'; 
@@ -48,30 +49,28 @@ export async function GET(request) {
                 // --- A. REKOMENDASI ---
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
-                    // Coba Recommended
-                    res = await fetchWithFallback(`${SHINIGAMI_API}/komik/recommended?type=${recType}`);
                     
-                    // Fallback 1: Popular
+                    // Recommended/Popular jarang berubah, cache 30 menit (1800 detik) aman
+                    res = await fetchWithCache(`${SHINIGAMI_API}/komik/popular?type=${recType}`, 1800); 
+                    
                     if (isDataEmpty(res)) {
-                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/popular?type=${recType}`);
+                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, 1800);
                     }
-                    // Fallback 2: List Update
                     if (isDataEmpty(res)) {
-                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`);
+                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`, 300);
                     }
                 } 
-                // --- B. LATEST UPDATE ---
+                // --- B. LATEST UPDATE (INI YANG KRUSIAL) ---
                 else {
-                    // Coba Latest
-                    res = await fetchWithFallback(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`);
+                    // Cache diturunkan jadi 90 detik (1.5 menit).
+                    // Cukup cepat untuk update chapter, cukup lama untuk cegah blokir.
+                    res = await fetchWithCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`, 90);
                     
-                    // Fallback 1: List Update
                     if (isDataEmpty(res)) {
-                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`);
+                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`, 90);
                     }
-                    // Fallback 2: Popular
                     if (isDataEmpty(res)) {
-                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/popular`);
+                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/popular`, 300);
                     }
                 }
 
@@ -79,7 +78,6 @@ export async function GET(request) {
                 if (items.length > 0) {
                     data = mapShinigami(items);
                 } 
-                // CATATAN: Emergency Data dihapus. Jika kosong, biarkan kosong agar UI bisa handle refresh.
             }
         }
 
@@ -90,7 +88,7 @@ export async function GET(request) {
     }
 }
 
-// --- HELPER FUNCTIONS ---
+// ... (Bagian Helper extractData dan isDataEmpty biarkan sama) ...
 
 function isDataEmpty(res) {
     if (!res) return true;
@@ -108,57 +106,54 @@ function extractData(res) {
     return [];
 }
 
-// 🔥 FUNGSI FETCH SAKTI (MULTI-PROXY) 🔥
-// Mencoba 3 jalur berbeda agar tidak kena blokir
-async function fetchWithFallback(url) {
-    // Jalur 1: Langsung (Direct)
-    let res = await tryFetch(url);
+// 🔥 FUNGSI FETCH DENGAN CACHE PINTAR 🔥
+async function fetchWithCache(url, cacheTime) {
+    // Jalur 1: Direct
+    let res = await tryFetch(url, cacheTime);
     if (!isDataEmpty(res)) return res;
 
-    // Jalur 2: Lewat Corsproxy.io (Bypass IP Block)
+    // Jalur 2: Proxy 1 (Cache dipersingkat di proxy agar cepat pulih kalau error)
     console.log("⚠️ Direct fail, trying Proxy 1...");
     const proxy1 = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-    res = await tryFetch(proxy1);
+    res = await tryFetch(proxy1, 60); 
     if (!isDataEmpty(res)) return res;
 
-    // Jalur 3: Lewat AllOrigins (Bypass IP Block Backup)
+    // Jalur 3: Proxy 2
     console.log("⚠️ Proxy 1 fail, trying Proxy 2...");
     const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    res = await tryFetch(proxy2);
-    if (!isDataEmpty(res)) return res;
-
-    return {}; // Menyerah
+    res = await tryFetch(proxy2, 60);
+    
+    return res || {};
 }
 
-async function tryFetch(url) {
+async function tryFetch(url, revalidateSeconds) {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // Timeout 8 detik
+        const timeoutId = setTimeout(() => controller.abort(), 6000); 
 
         const res = await fetch(url, { 
             signal: controller.signal,
             headers: { 
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Cache-Control": "no-cache, no-store, must-revalidate", // Paksa data baru
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }, 
-            next: { revalidate: 0 } 
+            // Cache dikontrol lewat parameter
+            next: { revalidate: revalidateSeconds } 
         });
         
         clearTimeout(timeoutId);
         
         if (res.ok) {
             const json = await res.json();
-            // Validasi isi JSON minimal
-            if (isDataEmpty(json)) return {}; 
+            if (isDataEmpty(json)) return null; 
             return json;
         }
-        return {};
+        return null;
     } catch (e) { 
-        return {}; 
+        return null; 
     }
 }
 
-// MAPPER
+// ... (Mapper Shinigami & KomikIndo TETAP SAMA seperti sebelumnya) ...
 function mapShinigami(list) {
     return list.map(item => {
         const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
