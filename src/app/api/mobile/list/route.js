@@ -1,21 +1,10 @@
 import { NextResponse } from "next/server";
 
-export const maxDuration = 60;
+export const maxDuration = 60; // Durasi maksimal eksekusi (detik)
 export const dynamic = 'force-dynamic';
 
 const SHINIGAMI_API = "https://api.sansekai.my.id/api";
 const KOMIKINDO_API = "https://rex4red-komik-api-scrape.hf.space";
-
-// DATA DARURAT (Jika semua API Shinigami Gagal/Down)
-// Ini agar tampilan HP tidak pernah kosong melompong
-const EMERGENCY_DATA = [
-    { title: "Chronicles Of The Lazy Sovereign", id: "chronicles-of-the-lazy-sovereign", image: "https://assets.shngm.id/thumbnail/image/77e63165-7815-4228-abc7-32a50baf9822.jpg", chapter: "Ch. 31", score: "8.5", type: "shinigami" },
-    { title: "Academy’s Undercover Professor", id: "academys-undercover-professor", image: "https://assets.shngm.id/thumbnail/image/1a1face5-4185-4f1b-bf60-77bba87da69d.jpg", chapter: "Ch. 153", score: "9.7", type: "shinigami" },
-    { title: "Demonic Emperor", id: "demonic-emperor", image: "https://assets.shngm.id/thumbnail/image/d00e4253-656d-481e-b3ef-701e4c6d451e.jpg", chapter: "Ch. 807", score: "8.6", type: "shinigami" },
-    { title: "Mercenary Enrollment", id: "mercenary-enrollment", image: "https://assets.shngm.id/thumbnail/image/c668834b4847.jpeg", chapter: "Ch. 271", score: "8.8", type: "shinigami" },
-    { title: "Damn Reincarnation", id: "damn-reincarnation", image: "https://assets.shngm.id/thumbnail/image/damn-reincarnation.jpg", chapter: "Ch. 80", score: "9.0", type: "shinigami" },
-    { title: "Swordmaster’s Youngest Son", id: "swordmasters-youngest-son", image: "https://assets.shngm.id/thumbnail/image/swordmasters-youngest-son.jpg", chapter: "Ch. 110", score: "9.2", type: "shinigami" },
-];
 
 export async function GET(request) {
     let data = [];
@@ -30,8 +19,8 @@ export async function GET(request) {
         // --- 1. MODE SEARCH ---
         if (query) {
             const [shinigami, komikindo] = await Promise.allSettled([
-                fetchJson(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
-                fetchJson(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
+                fetchWithFallback(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
+                fetchWithFallback(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
             ]);
 
             if (shinigami.status === 'fulfilled') {
@@ -47,60 +36,50 @@ export async function GET(request) {
         else {
             // === KOMIKINDO ===
             if (source === 'komikindo') {
-                const res = await fetchJson(`${KOMIKINDO_API}/komik/latest`);
+                const res = await fetchWithFallback(`${KOMIKINDO_API}/komik/latest`);
                 const items = extractData(res);
                 if (items.length > 0) data = mapKomikIndo(items);
             } 
-            // === SHINIGAMI (DENGAN SUPER FALLBACK) ===
+            // === SHINIGAMI ===
             else {
                 let res = {};
-                const selectedType = type || 'project'; // default project untuk latest
+                const selectedType = type || 'project'; 
                 
                 // --- A. REKOMENDASI ---
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
+                    // Coba Recommended
+                    res = await fetchWithFallback(`${SHINIGAMI_API}/komik/recommended?type=${recType}`);
                     
-                    // 1. Coba Recommended
-                    res = await fetchJson(`${SHINIGAMI_API}/komik/recommended?type=${recType}`);
-                    
-                    // 2. Fallback: Popular
+                    // Fallback 1: Popular
                     if (isDataEmpty(res)) {
-                        // console.log("Rec kosong, coba Popular...");
-                        res = await fetchJson(`${SHINIGAMI_API}/komik/popular?type=${recType}`);
+                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/popular?type=${recType}`);
                     }
-
-                    // 3. Fallback: List Biasa (Order by Update)
+                    // Fallback 2: List Update
                     if (isDataEmpty(res)) {
-                        // console.log("Popular kosong, coba List...");
-                        res = await fetchJson(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`);
+                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`);
                     }
-
                 } 
                 // --- B. LATEST UPDATE ---
                 else {
-                    // 1. Coba Latest
-                    res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`);
+                    // Coba Latest
+                    res = await fetchWithFallback(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`);
                     
-                    // 2. Fallback: List Biasa
+                    // Fallback 1: List Update
                     if (isDataEmpty(res)) {
-                        res = await fetchJson(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`);
+                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`);
                     }
-                    
-                    // 3. Fallback: Popular (Terpaksa)
+                    // Fallback 2: Popular
                     if (isDataEmpty(res)) {
-                        res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+                        res = await fetchWithFallback(`${SHINIGAMI_API}/komik/popular`);
                     }
                 }
 
-                // PROSES DATA
                 const items = extractData(res);
                 if (items.length > 0) {
                     data = mapShinigami(items);
-                } else {
-                    // 🔥 LAST RESORT: Jika API Mati Total, tampilkan Data Darurat
-                    // console.log("API MATI TOTAL, PAKE DATA DARURAT");
-                    data = mapShinigami(EMERGENCY_DATA); 
-                }
+                } 
+                // CATATAN: Emergency Data dihapus. Jika kosong, biarkan kosong agar UI bisa handle refresh.
             }
         }
 
@@ -111,7 +90,8 @@ export async function GET(request) {
     }
 }
 
-// Helper: Cek apakah response API kosong
+// --- HELPER FUNCTIONS ---
+
 function isDataEmpty(res) {
     if (!res) return true;
     if (res.data && Array.isArray(res.data) && res.data.length > 0) return false;
@@ -120,7 +100,6 @@ function isDataEmpty(res) {
     return true;
 }
 
-// Helper: Ekstrak array dari berbagai bentuk JSON
 function extractData(res) {
     if (!res) return [];
     if (Array.isArray(res)) return res;
@@ -129,23 +108,57 @@ function extractData(res) {
     return [];
 }
 
-// Helper: Fetch dengan Header "Menyamar"
-async function fetchJson(url) {
+// 🔥 FUNGSI FETCH SAKTI (MULTI-PROXY) 🔥
+// Mencoba 3 jalur berbeda agar tidak kena blokir
+async function fetchWithFallback(url) {
+    // Jalur 1: Langsung (Direct)
+    let res = await tryFetch(url);
+    if (!isDataEmpty(res)) return res;
+
+    // Jalur 2: Lewat Corsproxy.io (Bypass IP Block)
+    console.log("⚠️ Direct fail, trying Proxy 1...");
+    const proxy1 = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
+    res = await tryFetch(proxy1);
+    if (!isDataEmpty(res)) return res;
+
+    // Jalur 3: Lewat AllOrigins (Bypass IP Block Backup)
+    console.log("⚠️ Proxy 1 fail, trying Proxy 2...");
+    const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+    res = await tryFetch(proxy2);
+    if (!isDataEmpty(res)) return res;
+
+    return {}; // Menyerah
+}
+
+async function tryFetch(url) {
     try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // Timeout 8 detik
+
         const res = await fetch(url, { 
+            signal: controller.signal,
             headers: { 
-                // Header lengkap agar dianggap Browser Asli (Chrome Windows)
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://shinigami.id/",
-                "Accept": "application/json, text/plain, */*"
+                "Cache-Control": "no-cache, no-store, must-revalidate", // Paksa data baru
             }, 
             next: { revalidate: 0 } 
         });
-        return res.ok ? await res.json() : {};
-    } catch { return {}; }
+        
+        clearTimeout(timeoutId);
+        
+        if (res.ok) {
+            const json = await res.json();
+            // Validasi isi JSON minimal
+            if (isDataEmpty(json)) return {}; 
+            return json;
+        }
+        return {};
+    } catch (e) { 
+        return {}; 
+    }
 }
 
-// MAPPER (Tetap Sama)
+// MAPPER
 function mapShinigami(list) {
     return list.map(item => {
         const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
