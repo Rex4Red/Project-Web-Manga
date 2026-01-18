@@ -12,63 +12,60 @@ export async function GET(request) {
         const { searchParams } = new URL(request.url);
         const query = searchParams.get('q');
         const source = searchParams.get('source');
+        const section = searchParams.get('section'); // 'latest' (default) atau 'recommended'
 
-        // --- MODE SEARCH (PERBAIKAN UTAMA DISINI) ---
+        // --- 1. MODE SEARCH ---
         if (query) {
             const [shinigami, komikindo] = await Promise.allSettled([
                 fetchJson(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
                 fetchJson(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
             ]);
 
-            // 1. Handle Shinigami Search (FIX: Unwrapping Data yang Lebih Kuat)
-            if (shinigami.status === 'fulfilled') {
-                const res = shinigami.value;
-                let items = [];
-                
-                // Cek berbagai kemungkinan struktur JSON dari Search API
-                if (res.data && Array.isArray(res.data)) {
-                    items = res.data;
-                } else if (res.data?.data && Array.isArray(res.data.data)) {
-                    // Kadang dibungkus pagination wrapper: { data: { data: [] } }
-                    items = res.data.data;
-                } else if (Array.isArray(res)) {
-                    // Kadang langsung array: []
-                    items = res;
-                }
-
-                if (items.length > 0) {
-                    data = [...data, ...mapShinigami(items)];
-                }
+            if (shinigami.status === 'fulfilled' && shinigami.value.data) {
+                data = [...data, ...mapShinigami(shinigami.value.data)];
             }
-
-            // 2. Handle KomikIndo Search
             if (komikindo.status === 'fulfilled') {
-                const kVal = komikindo.value;
-                // KomikIndo juga kadang beda-beda
-                const kData = kVal.data || kVal;
-                if (Array.isArray(kData)) {
-                    data = [...data, ...mapKomikIndo(kData)];
-                }
+                const kData = komikindo.value.data || komikindo.value;
+                if (Array.isArray(kData)) data = [...data, ...mapKomikIndo(kData)];
             }
         } 
-        // --- MODE HOME (LATEST) ---
+        // --- 2. MODE HOME ---
         else {
+            // === KOMIKINDO ===
             if (source === 'komikindo') {
                 const res = await fetchJson(`${KOMIKINDO_API}/komik/latest`);
                 const items = res.data || res;
                 if (Array.isArray(items)) data = mapKomikIndo(items);
-            } else {
-                // Shinigami Latest
-                let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
-                if (!res.data || res.data.length === 0) {
-                    res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+            } 
+            // === SHINIGAMI ===
+            else {
+                // A. SECTION REKOMENDASI (Mixed Types)
+                if (section === 'recommended') {
+                    // Kita ambil Manhwa & Manhua (populer di Shinigami) lalu gabung
+                    const [manhwa, manhua] = await Promise.all([
+                        fetchJson(`${SHINIGAMI_API}/komik/recommended?type=manhwa`),
+                        fetchJson(`${SHINIGAMI_API}/komik/recommended?type=manhua`)
+                    ]);
+                    
+                    let recItems = [];
+                    if (manhwa.data) recItems = [...recItems, ...manhwa.data];
+                    if (manhua.data) recItems = [...recItems, ...manhua.data];
+                    
+                    // Acak urutan biar fresh
+                    recItems = recItems.sort(() => Math.random() - 0.5);
+                    data = mapShinigami(recItems);
+                } 
+                // B. SECTION LATEST (Default)
+                else {
+                    let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
+                    if (!res.data || res.data.length === 0) res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+
+                    let items = [];
+                    if (res.data && Array.isArray(res.data)) items = res.data;
+                    else if (res.data?.data && Array.isArray(res.data.data)) items = res.data.data;
+
+                    if (items.length > 0) data = mapShinigami(items);
                 }
-
-                let items = [];
-                if (res.data && Array.isArray(res.data)) items = res.data;
-                else if (res.data?.data && Array.isArray(res.data.data)) items = res.data.data;
-
-                if (items.length > 0) data = mapShinigami(items);
             }
         }
 
@@ -86,27 +83,17 @@ async function fetchJson(url) {
     } catch { return {}; }
 }
 
-// 🔥 MAPPER SHINIGAMI (SAMA SEPERTI SEBELUMNYA - SUDAH VALID)
+// MAPPER SHINIGAMI (Tetap sama yg sudah fix)
 function mapShinigami(list) {
     return list.map(item => {
-        // Gambar
-        const possibleImages = [
-            item.cover_portrait_url, item.cover_image_url, item.thumbnail,
-            item.image, item.thumb, item.cover, item.img
-        ];
+        const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
 
-        // Chapter
-        const possibleChapters = [
-            item.latest_chapter_text, item.latest_chapter, item.chapter,
-            item.last_chapter, item.chap, item.eps
-        ];
+        const possibleChapters = [item.latest_chapter_text, item.latest_chapter, item.chapter, item.last_chapter, item.chap, item.eps];
         let finalChapter = possibleChapters.find(ch => ch && ch.toString().trim().length > 0) || "Ch. ?";
 
         if (finalChapter !== "Ch. ?" && typeof finalChapter === 'string') {
-             if (finalChapter.toLowerCase().includes("chapter")) {
-                finalChapter = finalChapter.replace(/chapter/gi, "Ch.").trim();
-             }
+             if (finalChapter.toLowerCase().includes("chapter")) finalChapter = finalChapter.replace(/chapter/gi, "Ch.").trim();
         } else if (item.latest_chapter_number) {
              finalChapter = "Ch. " + item.latest_chapter_number;
         }
@@ -126,7 +113,6 @@ function mapKomikIndo(list) {
     return list.map(item => {
         let img = item.thumb || item.image || item.thumbnail || "";
         if (img && img.includes('?')) img = img.split('?')[0];
-
         return {
             id: item.endpoint || item.id || item.link,
             title: item.title,
