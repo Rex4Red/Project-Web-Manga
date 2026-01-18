@@ -33,37 +33,40 @@ export async function GET(request) {
         } 
         // --- 2. MODE HOME ---
         else {
+            // === KOMIKINDO (UPDATED) ===
             if (source === 'komikindo') {
-                const res = await fetchWithCache(`${KOMIKINDO_API}/komik/latest`, 300); 
+                let res = {};
+                
+                if (section === 'popular') {
+                    // Endpoint Popular (Cache 30 menit)
+                    res = await fetchWithCache(`${KOMIKINDO_API}/komik/popular`, 1800);
+                } else {
+                    // Endpoint Latest (Default) (Cache 5 menit)
+                    res = await fetchWithCache(`${KOMIKINDO_API}/komik/latest`, 300);
+                }
+
                 const items = extractData(res);
                 if (items.length > 0) data = mapKomikIndo(items);
             } 
+            // === SHINIGAMI ===
             else {
                 let res = {};
                 const selectedType = type || 'project'; 
                 
-                // --- A. REKOMENDASI (FIX FILTERING) ---
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
-                    
-                    // Prioritas 1: Recommended Asli (Sering kosong, tapi kalau ada paling bagus)
                     res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, 1800);
                     
-                    // Prioritas 2: List Popular per Tipe (INI YANG BENAR UNTUK FILTER)
-                    // Endpoint /list?type=...&order=popular DIJAMIN sesuai tipe
+                    // Fallback ke Popular List yang TERFILTER tipe
                     if (isDataEmpty(res)) {
                         res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`, 1800);
                     }
-                    
-                    // Prioritas 3: List Update per Tipe (Fallback terakhir)
                     if (isDataEmpty(res)) {
                         res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`, 300);
                     }
                 } 
-                // --- B. LATEST UPDATE ---
                 else {
                     res = await fetchWithCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`, 90);
-                    
                     if (isDataEmpty(res)) {
                         res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`, 90);
                     }
@@ -86,8 +89,8 @@ export async function GET(request) {
     }
 }
 
-// ... (SISA KODE KE BAWAH TETAP SAMA: isDataEmpty, extractData, fetchWithCache, Mappers)
-// Pastikan copy function helper di bawah ini juga agar file lengkap
+// ... (Copy Paste Helper functions: isDataEmpty, extractData, fetchWithCache, tryFetch dari kode sebelumnya) ...
+// ... (Helper functions SAMA PERSIS, tidak berubah, pastikan tetap ada di file) ...
 
 function isDataEmpty(res) {
     if (!res) return true;
@@ -175,16 +178,19 @@ function mapShinigami(list) {
     });
 }
 
+// 🔥 MAPPER KOMIKINDO UPDATED (Support Popular) 🔥
 function mapKomikIndo(list) {
     return list.map(item => {
         let img = item.thumb || item.image || item.thumbnail || "";
         if (img && img.includes('?')) img = img.split('?')[0];
+
         return {
             id: item.endpoint || item.id || item.link,
             title: item.title,
             image: img,
             chapter: item.chapter || item.latest_chapter || "Ch. ?",
-            score: item.score || "N/A",
+            // Komikindo Popular pakai field 'rating'
+            score: item.score || item.rating || "N/A", 
             type: 'komikindo'
         };
     });
