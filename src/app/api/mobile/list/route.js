@@ -65,13 +65,10 @@ async function fetchJson(url) {
     } catch { return {}; }
 }
 
-// 🔥 MAPPER FINAL (SUDAH DISESUAIKAN DENGAN CODE WEB) 🔥
-// ... (Bagian atas biarkan sama)
-
-// 🔥 MAPPER SHINIGAMI DIPERBAIKI (Chapter Fix) 🔥
+// 🔥 MAPPER SHINIGAMI DIPERBAIKI (Chapter & Image) 🔥
 function mapShinigami(list) {
     return list.map(item => {
-        // Gambar (Sudah OK, jangan diubah)
+        // --- GAMBAR ---
         const possibleImages = [
             item.cover_portrait_url, 
             item.cover_image_url,    
@@ -83,23 +80,26 @@ function mapShinigami(list) {
         ];
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
 
-        // Chapter (Kita tambahkan buruan baru)
+        // --- CHAPTER ---
+        // Kita cek field-field ini secara berurutan
         const possibleChapters = [
-            item.latest_chapter_text, // <-- INI YANG SERING DIPAKAI DI WEB
-            item.latest_chapter, 
-            item.chapter, 
+            item.latest_chapter_text, // Prioritas 1 (sering dipakai di web)
+            item.latest_chapter,      // Prioritas 2
+            item.chapter,             // Prioritas 3
             item.last_chapter,
             item.chap,
             item.eps
         ];
         
-        // Ambil chapter yang valid, kalau tidak ada pakai "Ch. ?"
-        let finalChapter = possibleChapters.find(ch => ch && ch.toString().length > 0) || "Ch. ?";
+        // Ambil chapter pertama yang valid (tidak null/undefined dan bukan string kosong)
+        let finalChapter = possibleChapters.find(ch => ch && ch.toString().trim().length > 0) || "Ch. ?";
 
-        // Bersihkan teks chapter biar rapi (opsional)
-        // Misal: "Chapter 31" -> "Ch. 31"
-        if (finalChapter.toLowerCase().includes("chapter")) {
-            finalChapter = finalChapter.replace(/chapter/i, "Ch.");
+        // Bersihkan teks chapter agar lebih rapi (Opsional)
+        // Contoh: "Chapter 31" -> "Ch. 31"
+        if (finalChapter !== "Ch. ?" && typeof finalChapter === 'string') {
+             if (finalChapter.toLowerCase().includes("chapter")) {
+                finalChapter = finalChapter.replace(/chapter/gi, "Ch.").trim();
+             }
         }
 
         return {
@@ -112,8 +112,6 @@ function mapShinigami(list) {
         };
     });
 }
-
-// ... (Bagian mapKomikIndo biarkan sama)
 
 function mapKomikIndo(list) {
     return list.map(item => {
