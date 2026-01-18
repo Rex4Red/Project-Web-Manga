@@ -35,10 +35,8 @@ export async function GET(request) {
                 const items = res.data || res;
                 if (Array.isArray(items)) data = mapKomikIndo(items);
             } else {
-                // Shinigami: Type Project
+                // Shinigami
                 let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
-                
-                // Fallback ke Popular jika Project kosong
                 if (!res.data || res.data.length === 0) {
                     res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
                 }
@@ -65,19 +63,35 @@ async function fetchJson(url) {
     } catch { return {}; }
 }
 
-// --- MAPPER YANG DIPERBAIKI (Added 'thumb') ---
-
+// 🔥 MAPPER SUPER AGRESIF (SOLUSI FINAL) 🔥
 function mapShinigami(list) {
-    return list.map(item => ({
-        id: item.manga_id || item.link || item.endpoint,
-        title: item.title,
-        // FIX: Tambahkan 'thumb' karena API Shinigami sering pakai ini
-        image: item.image || item.thumb || item.thumbnail || item.cover || "",
-        // FIX: Tambahkan 'last_chapter'
-        chapter: item.latest_chapter || item.chapter || item.last_chapter || "Ch. ?",
-        score: item.score || "N/A",
-        type: 'shinigami'
-    }));
+    return list.map(item => {
+        // Cek semua kemungkinan nama field gambar dari API
+        const possibleImages = [
+            item.thumbnail,  // Biasa
+            item.image,      // Alternatif 1
+            item.thumb,      // Alternatif 2
+            item.cover,      // Alternatif 3
+            item.img,        // Alternatif 4
+            item.url,        // Alternatif 5
+            item.poster      // Alternatif 6
+        ];
+
+        // Ambil yang pertama kali TIDAK kosong
+        const finalImage = possibleImages.find(img => img && img.length > 10) || "";
+
+        // Cek chapter juga
+        const finalChapter = item.latest_chapter || item.chapter || item.last_chapter || "Ch. ?";
+
+        return {
+            id: item.manga_id || item.link || item.endpoint,
+            title: item.title,
+            image: finalImage,
+            chapter: finalChapter,
+            score: item.score || "N/A",
+            type: 'shinigami'
+        };
+    });
 }
 
 function mapKomikIndo(list) {
