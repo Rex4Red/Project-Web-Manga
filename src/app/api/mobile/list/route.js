@@ -13,7 +13,7 @@ export async function GET(request) {
         const query = searchParams.get('q');
         const source = searchParams.get('source');
 
-        // MODE SEARCH
+        // --- MODE SEARCH ---
         if (query) {
             const [shinigami, komikindo] = await Promise.allSettled([
                 fetchJson(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
@@ -28,16 +28,20 @@ export async function GET(request) {
                 if (Array.isArray(kData)) data = [...data, ...mapKomikIndo(kData)];
             }
         } 
-        // MODE HOME
+        // --- MODE HOME (LATEST) ---
         else {
             if (source === 'komikindo') {
                 const res = await fetchJson(`${KOMIKINDO_API}/komik/latest`);
                 const items = res.data || res;
                 if (Array.isArray(items)) data = mapKomikIndo(items);
             } else {
-                // PENTING: Wajib pakai type=project
+                // Shinigami: Type Project
                 let res = await fetchJson(`${SHINIGAMI_API}/komik/latest?type=project`);
-                if (!res.data) res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+                
+                // Fallback ke Popular jika Project kosong
+                if (!res.data || res.data.length === 0) {
+                    res = await fetchJson(`${SHINIGAMI_API}/komik/popular`);
+                }
 
                 let items = [];
                 if (res.data && Array.isArray(res.data)) items = res.data;
@@ -61,24 +65,33 @@ async function fetchJson(url) {
     } catch { return {}; }
 }
 
+// --- MAPPER YANG DIPERBAIKI (Added 'thumb') ---
+
 function mapShinigami(list) {
     return list.map(item => ({
-        id: item.manga_id || item.link,
+        id: item.manga_id || item.link || item.endpoint,
         title: item.title,
-        image: item.thumbnail || item.image || item.cover || "",
-        chapter: item.latest_chapter || item.chapter || "Ch. ?",
+        // FIX: Tambahkan 'thumb' karena API Shinigami sering pakai ini
+        image: item.image || item.thumb || item.thumbnail || item.cover || "",
+        // FIX: Tambahkan 'last_chapter'
+        chapter: item.latest_chapter || item.chapter || item.last_chapter || "Ch. ?",
         score: item.score || "N/A",
         type: 'shinigami'
     }));
 }
 
 function mapKomikIndo(list) {
-    return list.map(item => ({
-        id: item.endpoint || item.id,
-        title: item.title,
-        image: item.thumb || item.image || "",
-        chapter: item.chapter || item.latest_chapter || "Ch. ?",
-        score: item.score || "N/A",
-        type: 'komikindo'
-    }));
+    return list.map(item => {
+        let img = item.thumb || item.image || item.thumbnail || "";
+        if (img && img.includes('?')) img = img.split('?')[0];
+
+        return {
+            id: item.endpoint || item.id || item.link,
+            title: item.title,
+            image: img,
+            chapter: item.chapter || item.latest_chapter || "Ch. ?",
+            score: item.score || "N/A",
+            type: 'komikindo'
+        };
+    });
 }
