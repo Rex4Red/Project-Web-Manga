@@ -1,9 +1,7 @@
 name: Sync to Hugging Face Hub
 on:
   push:
-    branches: [main] # Atau 'master', sesuaikan nama branch utamamu
-
-  # Supaya bisa dijalankan manual lewat tombol di GitHub
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -17,5 +15,6 @@ jobs:
       - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # 🔥 PERUBAHAN ADA DI SINI (TAMBAH --force) 🔥
         run: |
-          git push https://kuyang:$HF_TOKEN@huggingface.co/spaces/rex4red/rex4red-komik-api-scrape main
+          git push --force https://rex4red:$HF_TOKEN@huggingface.co/spaces/rex4red/rex4red-komik-api-scrape main
