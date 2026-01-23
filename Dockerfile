@@ -1,11 +1,7 @@
-# Gunakan image Node.js yang ringan
+# Gunakan image Node.js yang stabil
 FROM node:18-bullseye-slim
 
-# Setup working directory
-WORKDIR /app
-
-# Install dependency sistem yang mungkin dibutuhkan Puppeteer/Chromium
-# (Hapus bagian RUN apt-get ini jika scrapermu murni Cheerio/Axios dan tidak buka browser)
+# Install dependency sistem untuk Chromium (Wajib buat Puppeteer)
 RUN apt-get update && apt-get install -y \
     chromium \
     libnss3 \
@@ -14,11 +10,17 @@ RUN apt-get update && apt-get install -y \
     libharfbuzz-dev \
     ca-certificates \
     fonts-freefont-ttf \
-    nodejs \
-    npm \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy file package.json dulu (biar cache layer optimal)
+# Setup Environment Variables agar Puppeteer pake Chromium sistem
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Setup direktori kerja
+WORKDIR /app
+
+# Copy package.json dulu
 COPY package*.json ./
 
 # Install dependency project
@@ -27,8 +29,13 @@ RUN npm install
 # Copy semua file project
 COPY . .
 
-# Buka port 7860 (Hugging Face Spaces WAJIB pakai port 7860)
-EXPOSE 7860
+# 🔥 STEP PENTING NEXT.JS: Build Aplikasi 🔥
+# Ini akan mengubah TypeScript jadi JavaScript yang siap jalan
+RUN npm run build
 
-# Jalankan aplikasi
-CMD [ "node", "index.js" ]
+# Buka port 7860 (Standar Hugging Face)
+EXPOSE 7860
+ENV PORT 7860
+
+# 🔥 JALANKAN NEXT.JS (Bukan node index.js) 🔥
+CMD ["npm", "start"]
