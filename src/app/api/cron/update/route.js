@@ -104,21 +104,29 @@ async function checkSingleManga(manga) {
 
         } else {
             // --- KOMIKINDO (SCRAPE) ---
-            // Pembersihan ID (Jaga-jaga ada sisa angka di depan)
             let cleanId = manga.mangaId;
-            // if (/^\d+-/.test(cleanId)) cleanId = cleanId.replace(/^\d+-/, '');
-
+            
+            // Coba target domain yang lebih umum (komikindo.id / bacakomik)
+            // Ganti URL ini jika kamu tahu user biasa ambil dari mana
             const targetUrl = `https://komikindo.tv/komik/${cleanId}/`;
             
+            // 🔥 DEBUG: Munculkan link di Log biar ketahuan salahnya 🔥
+            console.log(`🔍 [${manga.title}] Mencoba buka: ${targetUrl}`);
+
             const res = await fetchSmart(targetUrl, { headers });
 
-            if (!res.ok) return `⚠️ SKIP [${manga.title}]: Gagal Akses (${res.status})`;
+            if (!res.ok) {
+                console.log(`❌ Gagal akses ${targetUrl} (Status: ${res.status})`);
+                return `⚠️ SKIP [${manga.title}]: Gagal Akses (${res.status})`;
+            }
             
             const html = await res.text();
             const $ = cheerio.load(html);
             
-            // Cek Judul Halaman (Untuk deteksi 404)
+            // Cek Judul Halaman
             const pageTitle = $('title').text().toLowerCase();
+            console.log(`📄 Judul Halaman didapat: "${$('title').text()}"`); // Debug Judul
+
             if (pageTitle.includes('page not found') || pageTitle.includes('404')) {
                 return `⚠️ SKIP [${manga.title}]: ID Salah/Halaman Tidak Ada`;
             }
