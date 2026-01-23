@@ -1,5 +1,5 @@
-# Gunakan image Node.js yang stabil
-FROM node:18-bullseye-slim
+# 🔥 UPDATE: Pakai Node.js 20 (Syarat Wajib Next.js Terbaru)
+FROM node:20-bullseye-slim
 
 # Install dependency sistem untuk Chromium (Wajib buat Puppeteer)
 RUN apt-get update && apt-get install -y \
@@ -29,13 +29,14 @@ RUN npm install
 # Copy semua file project
 COPY . .
 
-# 🔥 STEP PENTING NEXT.JS: Build Aplikasi 🔥
-# Ini akan mengubah TypeScript jadi JavaScript yang siap jalan
+# 🔥 Generate Prisma Client & Build Aplikasi 🔥
+# (Tambahkan npx prisma generate biar aman)
+RUN npx prisma generate
 RUN npm run build
 
 # Buka port 7860 (Standar Hugging Face)
 EXPOSE 7860
 ENV PORT 7860
 
-# 🔥 JALANKAN NEXT.JS (Bukan node index.js) 🔥
+# Jalankan Next.js
 CMD ["npm", "start"]
