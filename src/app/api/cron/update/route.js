@@ -2,16 +2,16 @@ import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 import * as cheerio from 'cheerio';
 
-// Supaya tidak timeout di Vercel/HF (maks 60 detik)
-export const maxDuration = 60; 
+// Konfigurasi Server
+export const maxDuration = 60; // Maksimal 60 detik (Limit Vercel/HF Free)
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    console.log("🚀 [WEB-CRON] Job Started (Logic Mobile)...");
+    console.log("🚀 [WEB-CRON] Job Started (Multi-Proxy Mode)...");
     const startTime = Date.now();
 
     try {
-        // 1. Ambil semua koleksi dari Database (Prisma)
+        // 1. Ambil data komik dari Database
         const collections = await prisma.collection.findMany({
             include: { user: true }
         });
@@ -21,15 +21,15 @@ export async function GET(request) {
         }
 
         // --- KONFIGURASI BATCH ---
-        const BATCH_SIZE = 3;  // Cek 3 komik sekaligus
+        const BATCH_SIZE = 3;  // Cek 3 komik sekaligus (aman untuk Proxy)
         const logs = [];
         let updatesFound = 0;
 
-        console.log(`⚡ Mengantre ${collections.length} manga...`);
+        console.log(`⚡ Memeriksa ${collections.length} komik...`);
 
-        // 2. Loop per Batch
+        // 2. Loop cek update per Batch
         for (let i = 0; i < collections.length; i += BATCH_SIZE) {
-            // Safety: Stop jika waktu server hampir habis (50 detik)
+            // Safety: Stop jika waktu hampir habis (50 detik)
             if ((Date.now() - startTime) > 50000) {
                 logs.push("⚠️ FORCE STOP: Waktu server habis.");
                 break; 
@@ -37,7 +37,7 @@ export async function GET(request) {
 
             const batch = collections.slice(i, i + BATCH_SIZE);
             
-            // Cek update secara paralel untuk batch ini
+            // Jalankan pengecekan secara paralel
             const results = await Promise.all(batch.map(manga => checkMangaUpdate(manga)));
             
             results.forEach(res => {
@@ -45,9 +45,9 @@ export async function GET(request) {
                 if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            // Istirahat sebentar biar tidak dianggap spam
+            // Istirahat 2 detik antar batch biar tidak dianggap DDOS
             if (i + BATCH_SIZE < collections.length) {
-                await new Promise(r => setTimeout(r, 1500));
+                await new Promise(r => setTimeout(r, 2000));
             }
         }
 
@@ -65,19 +65,19 @@ export async function GET(request) {
     }
 }
 
-// --- FUNGSI UTAMA PENGECEKAN ---
+// --- FUNGSI LOGIKA PENGECEKAN ---
 async function checkMangaUpdate(manga) {
     // Cek apakah user punya notif aktif (Hemat resource)
     const hasDiscord = !!manga.user?.webhookUrl;
     const hasTelegram = !!(manga.user?.telegramToken && manga.user?.telegramChatId);
     
-    // Kalau user gak pasang notif, skip aja pengecekan
-    if (!hasDiscord && !hasTelegram) return null; 
+    // Kalau user gak pasang notif, skip aja (kecuali mau update DB doang)
+    // if (!hasDiscord && !hasTelegram) return null; 
 
-    // Deteksi Source (Logika sederhana: ID Shinigami biasanya panjang/UUID)
+    // Deteksi Source (Shinigami ID biasanya panjang/UUID, Komikindo angka/pendek)
     const isShinigami = manga.mangaId.length > 20; 
     
-    // 🔥 HEADERS SAKTI DARI MOBILE 🔥
+    // Headers Penyamaran (Android)
     const headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
         "Referer": "https://google.com",
@@ -87,7 +87,7 @@ async function checkMangaUpdate(manga) {
         let latestChapter = "";
 
         if (isShinigami) {
-            // --- SHINIGAMI (API) ---
+            // --- SHINIGAMI (Via API) ---
             const apiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
             const res = await fetchSmart(apiUrl, { headers });
             
@@ -103,50 +103,48 @@ async function checkMangaUpdate(manga) {
             }
 
         } else {
-            // --- KOMIKINDO (SCRAPE) ---
+            // --- KOMIKINDO (Via Scrape HTML) ---
             const targetUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
             
-            // Gunakan fetchSmart (Direct -> Proxy -> Proxy)
+            // Gunakan fetchSmart (Direct -> Proxy 1 -> Proxy 2)
             const res = await fetchSmart(targetUrl, { headers });
 
             if (res.ok) {
                 const html = await res.text();
                 const $ = cheerio.load(html);
                 
-                // 🔥 SELECTOR KUAT DARI MOBILE (4 LAYER) 🔥
-                let rawText = $('#chapter_list .lchx a').first().text();        // Selector 1
-                if (!rawText) rawText = $('.chapter-list li:first-child a').text(); // Selector 2
-                if (!rawText) rawText = $('#chapter_list li:first-child a').text(); // Selector 3
-                if (!rawText) rawText = $('.lchx a').first().text();                // Selector 4
+                // Selector Berlapis (Coba satu-satu sampai dapat)
+                let rawText = $('#chapter_list .lchx a').first().text();        
+                if (!rawText) rawText = $('.chapter-list li:first-child a').text(); 
+                if (!rawText) rawText = $('#chapter_list li:first-child a').text();
+                if (!rawText) rawText = $('.lchx a').first().text();
 
                 if (rawText) {
                     latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
                 } else {
-                    // Cek apakah kena Cloudflare
                     if (html.includes('Just a moment')) return `⚠️ SKIP [${manga.title}]: Kena Cloudflare`;
                     return `⚠️ SKIP [${manga.title}]: Gagal Parsing HTML`;
                 }
             } else {
-                return `⚠️ SKIP [${manga.title}]: HTTP ${res.status}`;
+                return `⚠️ SKIP [${manga.title}]: Gagal Akses (${res.status})`;
             }
         }
 
-        // --- LOGIKA UPDATE DB ---
+        // --- CEK APAKAH ADA UPDATE ---
         if (latestChapter && latestChapter !== manga.lastChapter) {
-            // Bersihkan angka untuk perbandingan (biar "Chapter 10" == "10")
+            // Bersihkan angka (biar "Chapter 10" dianggap sama dengan "10")
             const cleanOld = manga.lastChapter ? manga.lastChapter.replace(/[^0-9.]/g, '') : "0";
             const cleanNew = latestChapter.replace(/[^0-9.]/g, '');
             
-            // Jika angkanya sama, jangan update (mencegah spam notif typo)
             if (cleanOld === cleanNew && manga.lastChapter) return null; 
 
-            // 1. Update Database Prisma
+            // 1. Update Database
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: latestChapter }
             });
 
-            // 2. Kirim Notifikasi (Asynchronous / Fire & Forget)
+            // 2. Kirim Notifikasi (Fire & Forget - Gak perlu ditunggu)
             const notifPromises = [];
             if (hasDiscord) {
                 notifPromises.push(sendDiscord(manga.user.webhookUrl, manga.title, latestChapter, manga.image));
@@ -154,7 +152,7 @@ async function checkMangaUpdate(manga) {
             if (hasTelegram) {
                 notifPromises.push(sendTelegram(manga.user.telegramToken, manga.user.telegramChatId, manga.title, latestChapter, manga.image));
             }
-            Promise.allSettled(notifPromises); // Gak perlu tunggu selesai
+            Promise.allSettled(notifPromises);
 
             return `✅ UPDATE [${manga.title}]: ${latestChapter}`;
         }
@@ -166,9 +164,9 @@ async function checkMangaUpdate(manga) {
     }
 }
 
-// --- FUNGSI FETCH PINTAR (ADAPTASI DARI MOBILE) ---
+// --- FUNGSI FETCH PINTAR (SAMA DENGAN MOBILE) ---
 async function fetchSmart(url, options = {}) {
-    // JALUR 1: Direct (Langsung)
+    // 1. JALUR UTAMA (Direct)
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 detik timeout
@@ -179,33 +177,27 @@ async function fetchSmart(url, options = {}) {
         });
         clearTimeout(timeoutId);
         if (res.ok) return res;
-        if (res.status === 404) return res; // Kalau 404 brarti emang gak ada
+        if (res.status === 404) return res; // 404 berarti emang gak ada
     } catch (e) { /* Lanjut ke proxy */ }
 
-    // JALUR 2: Proxy 1 (CorsProxy)
+    // 2. JALUR CADANGAN 1 (CorsProxy)
     try {
         const proxy1 = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch(proxy1, { ...options, signal: controller.signal });
-        clearTimeout(timeoutId);
+        const res = await fetch(proxy1, { ...options, signal: AbortSignal.timeout(8000) });
         if (res.ok) return res;
     } catch (e) { /* Lanjut ke proxy backup */ }
 
-    // JALUR 3: Proxy 2 (AllOrigins)
+    // 3. JALUR CADANGAN 2 (AllOrigins)
     try {
         const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        const res = await fetch(proxy2, { ...options, signal: controller.signal });
-        clearTimeout(timeoutId);
+        const res = await fetch(proxy2, { ...options, signal: AbortSignal.timeout(8000) });
         return res; 
     } catch (e) {
         throw new Error("Semua jalur (Direct & Proxy) gagal.");
     }
 }
 
-// --- FUNGSI NOTIFIKASI ---
+// --- FUNGSI KIRIM NOTIFIKASI ---
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     try {
         await fetch(webhookUrl, {
@@ -227,7 +219,7 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
 async function sendTelegram(token, chatId, title, chapter, cover) {
     const text = `🚨 *${title}* Update!\n${chapter}`;
     try {
-        // Coba kirim foto dulu
+        // Kirim Gambar Dulu
         if (cover && cover.startsWith("http")) {
             const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
                 method: "POST",
@@ -241,7 +233,7 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
             });
             if (res.ok) return;
         }
-        // Kalau foto gagal, kirim teks saja
+        // Kalau gambar gagal, kirim teks saja
         await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
