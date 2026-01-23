@@ -44,3 +44,5 @@ node_modules
 .next
 .env            <--- WAJIB ADA INI
 .env.local
+venv/
+comic-notifier/venv/
