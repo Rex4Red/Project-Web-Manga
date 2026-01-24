@@ -195,42 +195,47 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
 
 // --- FUNGSI KIRIM TELEGRAM (DIPERBAIKI) ---
 // --- FUNGSI KIRIM TELEGRAM (VERSI ANTI-GAGAL) ---
+// --- FUNGSI KIRIM TELEGRAM (VERSI FINAL & BERSIH) ---
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
-        // 1. BERSIHKAN TOKEN & ID (PENTING!)
-        // Seringkali error 'fetch failed' terjadi karena ada spasi di awal/akhir token
-        const cleanToken = token.trim().replace(/\s/g, '');
-        const cleanChatId = chatId.toString().trim().replace(/\s/g, '');
+        // 🔥 INI KUNCINYA: Hapus spasi/enter nakal secara paksa!
+        // Biarpun database kotor, kode ini akan membersihkannya.
+        const cleanToken = token ? token.toString().trim().replace(/\s/g, '') : "";
+        const cleanChatId = chatId ? chatId.toString().trim().replace(/\s/g, '') : "";
 
-        // 2. SIAPKAN PESAN
-        // Gunakan format Markdown Link [Teks](URL) agar gambar tetap muncul previewnya
-        // tapi beban requestnya ringan (dianggap Text oleh server).
+        if (!cleanToken || !cleanChatId) return "Err: Token/ChatID kosong";
+
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+        // Coba kirim Foto dulu
+        const res = await fetch(`https://api.telegram.org/bot${cleanToken}/sendPhoto`, {
+            method: "POST", 
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+                chat_id: cleanChatId, 
+                photo: safeCover, 
+                caption: text, 
+                parse_mode: 'Markdown' 
+            })
+        });
 
-        // 3. KIRIM REQUEST
-        const res = await fetch(url, {
+        if (res.ok) return "OK";
+
+        // Fallback ke Text Only jika foto gagal
+        await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
             method: "POST", 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
                 chat_id: cleanChatId, 
                 text: text, 
-                parse_mode: 'Markdown',
-                disable_web_page_preview: false // Biar gambar cover muncul sebagai preview
+                parse_mode: 'Markdown' 
             })
         });
 
-        // 4. CEK HASIL
-        if (res.ok) return "OK";
-        
-        // Kalau gagal, baca pesan error dari Telegram
-        const errText = await res.text();
-        return `Err TG ${res.status}: ${errText.substring(0, 100)}`; // Ambil 100 huruf pertama errornya
+        return "OK (Fallback)";
 
     } catch (e) {
-        // Tangkap error koneksi (misal server HuggingFace lagi lemot)
-        return `Fail Conn: ${e.message}`;
+        return `Fail: ${e.message}`;
     }
 }
