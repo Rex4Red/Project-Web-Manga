@@ -5,7 +5,7 @@ export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 // URL API Kamu
-const MY_APP_URL = "https://rex4red-rex4red-komik-api-scrape.hf.space";
+const MY_APP_URL = "https://rex4red-komik-api-scrape.hf.space";
 
 export async function GET(request) {
     console.log("🚀 [FINAL-CRON] Job Started...");
