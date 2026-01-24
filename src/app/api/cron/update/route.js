@@ -77,7 +77,7 @@ async function checkSingleManga(manga) {
         } else {
             // --- KOMIKINDO ---
             // Kita asumsikan ID di database adalah slug murni
-            debugUrl = `https://komikindo.tv/komik/${manga.mangaId}/`;
+            debugUrl = `https://komikindo.ch/komik/${manga.mangaId}/`;
 
             const res = await fetchSmart(debugUrl, { headers });
 
