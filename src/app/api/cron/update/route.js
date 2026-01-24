@@ -96,7 +96,7 @@ async function checkSingleManga(manga) {
 
             if (!res.ok) {
                 // Kalau API sendiri error 404/500
-                return `⚠️ API ERROR (${res.status}) -> ID: ${manga.mangaId}`;
+                return `❌ API 404 [${manga.title}] -> ID Database: ${manga.mangaId} (Harusnya Slug)`;
             }
 
             const json = await res.json();
