@@ -136,7 +136,7 @@ async function checkSingleManga(manga) {
         return null;
 
     } catch (err) {
-        return `❌ SYSTEM ERR: ${err.message} | API: ${targetApiUrl}`;
+        return `❌ API 404 [${manga.title}] -> ID Database: ${manga.mangaId} (Harusnya Slug)`;
     }
 }
 
