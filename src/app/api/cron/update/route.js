@@ -63,37 +63,34 @@ export async function GET(request) {
 }
 
 async function checkSingleManga(manga) {
-    // Cek Notif User (Hemat Resource)
     const hasDiscord = !!manga.user?.webhookUrl;
     const hasTelegram = !!(manga.user?.telegramToken && manga.user?.telegramChatId);
     
-    // Uncomment baris bawah ini jika ingin skip user yang tidak punya notif
-    // if (!hasDiscord && !hasTelegram) return null; 
-
-    // Logic Deteksi Source
+    // Deteksi Source
     let isShinigami = false;
     if (manga.source) {
         isShinigami = manga.source.toLowerCase().includes('shinigami');
     } else {
-        // Deteksi ID panjang/angka
         isShinigami = manga.mangaId.length > 50 || /^\d+$/.test(manga.mangaId);
     }
     
-    // Header Android (PENTING)
     const headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
         "Referer": "https://google.com",
     };
 
+    // 🔥 VARIABLE UNTUK MELACAK URL 🔥
+    let debugUrl = "Belum ditentukan"; 
+
     try {
         let chapterBaruText = "";
 
         if (isShinigami) {
-            // --- SHINIGAMI (API) ---
-            const apiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
-            const res = await fetchSmart(apiUrl, { headers });
+            // --- SHINIGAMI ---
+            debugUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
+            const res = await fetchSmart(debugUrl, { headers });
             
-            if (!res.ok) return null; // Silent skip
+            if (!res.ok) return null; 
             
             try {
                 const json = await res.json();
@@ -103,52 +100,43 @@ async function checkSingleManga(manga) {
             } catch (e) { return null; }
 
         } else {
-            // --- KOMIKINDO (SCRAPE) ---
-            let cleanId = manga.mangaId;
-            
-            // Coba target domain yang lebih umum (komikindo.id / bacakomik)
-            // Ganti URL ini jika kamu tahu user biasa ambil dari mana
-            const targetUrl = `https://komikindo.tv/komik/${cleanId}/`;
-            
-            // 🔥 DEBUG: Munculkan link di Log biar ketahuan salahnya 🔥
-            console.log(`🔍 [${manga.title}] Mencoba buka: ${targetUrl}`);
+            // --- KOMIKINDO ---
+            const cleanId = manga.mangaId; 
+            debugUrl = `https://komikindo.tv/komik/${cleanId}/`; // <--- INI URL YANG KITA CARI
 
-            const res = await fetchSmart(targetUrl, { headers });
+            const res = await fetchSmart(debugUrl, { headers });
 
-            if (!res.ok) {
-                console.log(`❌ Gagal akses ${targetUrl} (Status: ${res.status})`);
-                return `⚠️ SKIP [${manga.title}]: Gagal Akses (${res.status})`;
-            }
+            if (!res.ok) return `⚠️ SKIP [${manga.title}]: Gagal Akses (${res.status}) -> ${debugUrl}`;
             
             const html = await res.text();
             const $ = cheerio.load(html);
             
-            // Cek Judul Halaman
+            // Cek 404
             const pageTitle = $('title').text().toLowerCase();
-            console.log(`📄 Judul Halaman didapat: "${$('title').text()}"`); // Debug Judul
-
             if (pageTitle.includes('page not found') || pageTitle.includes('404')) {
-                return `⚠️ SKIP [${manga.title}]: ID Salah/Halaman Tidak Ada`;
+                return `⚠️ SKIP [${manga.title}]: Halaman Tidak Ada (404) -> ${debugUrl}`;
             }
 
-            // Selector Berlapis (Sesuai Backup + Tambahan)
+            // Selector
             let rawText = $('#chapter_list .lchx a').first().text();
             if (!rawText) rawText = $('.chapter-list li:first-child a').text();
             if (!rawText) rawText = $('#chapter_list li:first-child a').text();
             if (!rawText) rawText = $('.lchx a').first().text();
 
-            if (rawText) chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
-            else return `⚠️ SKIP [${manga.title}]: Gagal Parsing HTML`;
+            if (rawText) {
+                chapterBaruText = rawText.replace("Bahasa Indonesia", "").trim();
+            } else {
+                return `⚠️ SKIP [${manga.title}]: Gagal Parsing HTML -> ${debugUrl}`;
+            }
         }
 
-        // --- CEK UPDATE ---
+        // --- UPDATE DB ---
         if (chapterBaruText && manga.lastChapter !== chapterBaruText) {
             const numOld = manga.lastChapter ? manga.lastChapter.replace(/[^0-9.]/g, '') : "0";
             const numNew = chapterBaruText.replace(/[^0-9.]/g, '');
             
             if (numOld === numNew && numOld !== "") return null; 
 
-            // Update DB
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
@@ -166,7 +154,7 @@ async function checkSingleManga(manga) {
         return null;
 
     } catch (err) {
-        return `❌ ERR [${manga.title}]: ${err.message}`;
+        return `❌ ERR [${manga.title}]: ${err.message} | URL: ${debugUrl}`;
     }
 }
 
