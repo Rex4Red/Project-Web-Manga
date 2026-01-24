@@ -194,41 +194,43 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
 }
 
 // --- FUNGSI KIRIM TELEGRAM (DIPERBAIKI) ---
+// --- FUNGSI KIRIM TELEGRAM (VERSI ANTI-GAGAL) ---
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
+        // 1. BERSIHKAN TOKEN & ID (PENTING!)
+        // Seringkali error 'fetch failed' terjadi karena ada spasi di awal/akhir token
+        const cleanToken = token.trim().replace(/\s/g, '');
+        const cleanChatId = chatId.toString().trim().replace(/\s/g, '');
+
+        // 2. SIAPKAN PESAN
+        // Gunakan format Markdown Link [Teks](URL) agar gambar tetap muncul previewnya
+        // tapi beban requestnya ringan (dianggap Text oleh server).
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
-        const text = `🚨 *${title}* Update!\n\n${chapter}\n[Baca Sekarang]`;
+        const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        // Coba kirim Foto
-        const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+        const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+
+        // 3. KIRIM REQUEST
+        const res = await fetch(url, {
             method: "POST", 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
-                chat_id: chatId, 
-                photo: safeCover, 
-                caption: text, 
-                parse_mode: 'Markdown' 
-            })
-        });
-
-        if (res.ok) return "OK";
-
-        // Kalau kirim foto gagal (misal format gambar salah), kirim Text saja
-        const resText = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-            method: "POST", 
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                chat_id: chatId, 
+                chat_id: cleanChatId, 
                 text: text, 
-                parse_mode: 'Markdown' 
+                parse_mode: 'Markdown',
+                disable_web_page_preview: false // Biar gambar cover muncul sebagai preview
             })
         });
 
-        if (resText.ok) return "OK (Text Only)";
+        // 4. CEK HASIL
+        if (res.ok) return "OK";
         
-        const errJson = await resText.json();
-        return `Err ${res.status} - ${errJson.description}`; // Log error detail dari Telegram
+        // Kalau gagal, baca pesan error dari Telegram
+        const errText = await res.text();
+        return `Err TG ${res.status}: ${errText.substring(0, 100)}`; // Ambil 100 huruf pertama errornya
+
     } catch (e) {
-        return `Fail (${e.message})`;
+        // Tangkap error koneksi (misal server HuggingFace lagi lemot)
+        return `Fail Conn: ${e.message}`;
     }
 }
