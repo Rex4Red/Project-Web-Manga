@@ -67,7 +67,8 @@ async function checkSingleManga(manga) {
         if (manga.source) {
             isShinigami = manga.source.toLowerCase().includes('shinigami');
         } else {
-            // 🔥 PERBAIKAN: Ubah 50 jadi 30 supaya UUID (36 chars) terdeteksi 🔥
+            // 🔥 PERBAIKAN: Ganti 50 jadi 30 (Wajib!) 🔥
+            // Karena UUID panjangnya cuma 36 karakter
             isShinigami = manga.mangaId.length > 30 || /^\d+$/.test(manga.mangaId);
         }
 
