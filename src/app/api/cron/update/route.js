@@ -1,16 +1,14 @@
 import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
-// Tidak butuh cheerio lagi karena kita baca JSON
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
 
-// 🔥 CONFIG: Masukkan URL Publik App Kamu Sendiri Di Sini 🔥
-// Pastikan ini URL yang sama dengan yang kamu pakai di Swagger/Curl tadi
+// URL API Kamu
 const MY_APP_URL = "https://rex4red-rex4red-komik-api-scrape.hf.space";
 
 export async function GET(request) {
-    console.log("🚀 [SMART-CRON] Job Started (Via Internal API)...");
+    console.log("🚀 [FINAL-CRON] Job Started...");
     const startTime = Date.now();
 
     try {
@@ -19,20 +17,17 @@ export async function GET(request) {
         });
 
         if (collections.length === 0) return NextResponse.json({ message: "Koleksi kosong." });
-
-        // Acak urutan
+        
+        // Acak antrian
         collections = collections.sort(() => Math.random() - 0.5);
 
-        const BATCH_SIZE = 5; // Bisa lebih banyak karena API kamu cepat
+        const BATCH_SIZE = 5; 
         const logs = [];
         let updatesFound = 0;
 
-        console.log(`⚡ Memeriksa ${collections.length} manga via API Sendiri...`);
-
         for (let i = 0; i < collections.length; i += BATCH_SIZE) {
-            // Safety: Stop jika waktu server habis
             if ((Date.now() - startTime) > 50000) {
-                logs.push("⚠️ FORCE STOP: Waktu server habis.");
+                logs.push("⚠️ FORCE STOP: Waktu habis.");
                 break; 
             }
 
@@ -44,7 +39,6 @@ export async function GET(request) {
                 if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            // Istirahat dikit
             if (i + BATCH_SIZE < collections.length) await new Promise(r => setTimeout(r, 1000));
         }
 
@@ -56,24 +50,23 @@ export async function GET(request) {
 }
 
 async function checkSingleManga(manga) {
-    // Variable buat Debug
     let targetApiUrl = "";
 
     try {
         let chapterBaruText = "";
 
-        // Deteksi Source
+        // 🔥 LOGIKA DETEKSI YANG BENAR (WAJIB > 30) 🔥
         let isShinigami = false;
         if (manga.source) {
             isShinigami = manga.source.toLowerCase().includes('shinigami');
         } else {
-            // 🔥 PERBAIKAN: Ganti 50 jadi 30 (Wajib!) 🔥
-            // Karena UUID panjangnya cuma 36 karakter
+            // UUID panjangnya 36, jadi harus > 30 biar kedeteksi
             isShinigami = manga.mangaId.length > 30 || /^\d+$/.test(manga.mangaId);
         }
 
         if (isShinigami) {
-            // --- SHINIGAMI (External API) ---
+            // --- JALUR SHINIGAMI (API LUAR) ---
+            // UUID (Absolute Regression, Patron of Villains) akan masuk sini
             targetApiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
             const res = await fetch(targetApiUrl, { next: { revalidate: 0 } });
             
@@ -82,54 +75,47 @@ async function checkSingleManga(manga) {
                 if (json.data?.latest_chapter_number) {
                     chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
                 }
+            } 
+            // Kalau Shinigami error, kita silent skip aja (jangan bikin merah log)
+            else {
+                return null; 
             }
 
         } else {
-            // --- KOMIKINDO (PAKAI API SENDIRI!) ---
-            // Kita tembak: /komik/detail/{mangaId}
+            // --- JALUR KOMIKINDO (API SENDIRI) ---
+            // Slug pendek (Weapon Eating Bastard, One Piece) masuk sini
             targetApiUrl = `${MY_APP_URL}/komik/detail/${encodeURIComponent(manga.mangaId)}`;
 
-            // Fetch ke diri sendiri
             const res = await fetch(targetApiUrl, { 
                 method: 'GET',
                 headers: { 'Cache-Control': 'no-cache' },
-                next: { revalidate: 0 } // Pastikan data fresh
+                next: { revalidate: 0 }
             });
 
             if (!res.ok) {
-                // Kalau API sendiri error 404/500
-                return `❌ API 404 [${manga.title}] -> ID Database: ${manga.mangaId} (Harusnya Slug)`;
+                // Khusus "Weapon-Eating Bastard", kalau masuk sini & error, berarti slugnya salah
+                return `❌ SLUG SALAH [${manga.title}] -> 404 di API Internal`;
             }
 
             const json = await res.json();
-
-            // Parsing response sesuai struktur JSON kamu (lihat screenshot Curl kamu)
-            // Struktur: { status: true, data: { title: "...", chapters: [ { title: "Chapter 18" }, ... ] } }
             
             if (json.status && json.data && json.data.chapters && json.data.chapters.length > 0) {
-                // Ambil chapter paling atas (Chapter 18 di screenshot)
-                const latestObj = json.data.chapters[0];
-                chapterBaruText = latestObj.title; // "Chapter 18"
-            } else {
-                return `⚠️ JSON KOSONG -> ID: ${manga.mangaId}`;
+                chapterBaruText = json.data.chapters[0].title;
             }
         }
 
         // --- UPDATE DATABASE ---
         if (chapterBaruText && manga.lastChapter !== chapterBaruText) {
-            // Logic pembanding angka (biar aman)
             const cleanOld = manga.lastChapter ? manga.lastChapter.replace(/[^0-9.]/g, '') : "0";
             const cleanNew = chapterBaruText.replace(/[^0-9.]/g, '');
             
             if (cleanOld === cleanNew && cleanOld !== "") return null; 
 
-            // Update ke DB
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
             });
 
-            // Kirim Notif (Fire & Forget)
             if (manga.user?.webhookUrl) sendDiscord(manga.user.webhookUrl, manga.title, chapterBaruText, manga.image);
 
             return `✅ UPDATE [${manga.title}]: ${chapterBaruText}`;
@@ -138,7 +124,7 @@ async function checkSingleManga(manga) {
         return null;
 
     } catch (err) {
-        return `❌ API 404 [${manga.title}] -> ID Database: ${manga.mangaId} (Harusnya Slug)`;
+        return `❌ SYSTEM ERR: ${err.message}`;
     }
 }
 
