@@ -12,13 +12,13 @@ export async function GET(request) {
     const startTime = Date.now();
 
     try {
+        // Include user agar kita bisa ambil tokennya
         let collections = await prisma.collection.findMany({
-            include: { user: true }
+            include: { user: true } 
         });
 
         if (collections.length === 0) return NextResponse.json({ message: "Koleksi kosong." });
         
-        // Acak antrian biar beban server target terdistribusi
         collections = collections.sort(() => Math.random() - 0.5);
 
         const BATCH_SIZE = 5; 
@@ -67,14 +67,13 @@ async function checkSingleManga(manga) {
         if (isShinigami) {
             targetApiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
             const res = await fetch(targetApiUrl, { next: { revalidate: 0 } });
-            
             if (res.ok) {
                 const json = await res.json();
                 if (json.data?.latest_chapter_number) {
                     chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
                 }
             } else {
-                return null; // Silent skip
+                return null; 
             }
         } else {
             targetApiUrl = `${MY_APP_URL}/komik/detail/${encodeURIComponent(manga.mangaId)}`;
@@ -84,10 +83,8 @@ async function checkSingleManga(manga) {
                 next: { revalidate: 0 }
             });
 
-            if (!res.ok) {
-                return `❌ SLUG SALAH [${manga.title}] -> 404 di API Internal`;
-            }
-
+            if (!res.ok) return `❌ SLUG SALAH [${manga.title}]`;
+            
             const json = await res.json();
             if (json.status && json.data && json.data.chapters && json.data.chapters.length > 0) {
                 chapterBaruText = json.data.chapters[0].title;
@@ -101,7 +98,7 @@ async function checkSingleManga(manga) {
             
             if (cleanOld === cleanNew && cleanOld !== "") return null; 
 
-            // 1. Update Database Prisma
+            // 1. Update Database
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
@@ -109,23 +106,28 @@ async function checkSingleManga(manga) {
 
             const notifLogs = [];
 
-            // 2. Kirim Discord (Jika ada)
+            // 2. Kirim Discord
             if (manga.user?.webhookUrl) {
                 await sendDiscord(manga.user.webhookUrl, manga.title, chapterBaruText, manga.image);
                 notifLogs.push("DC");
             }
 
-            // 3. Kirim Telegram (Jika ada)
-            // Cek field camelCase (Prisma default) atau snake_case (Raw DB)
-            const tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token;
-            const tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id;
+            // 3. Kirim Telegram (Debug Version)
+            // Cek berbagai kemungkinan nama kolom di Prisma
+            const tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token || manga.user?.telegramToken;
+            const tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id || manga.user?.chatId;
 
             if (tgToken && tgChatId) {
                 const status = await sendTelegram(tgToken, tgChatId, manga.title, chapterBaruText, manga.image);
                 notifLogs.push(`TG: ${status}`);
+            } else {
+                // 🔥 DEBUG: Log kenapa dia skip
+                // Kita tampilkan keys yang ada di object user biar tau kolom mana yang tersedia
+                const keys = manga.user ? Object.keys(manga.user).join(",") : "User NULL";
+                notifLogs.push(`TG: Skip (No Token found in: ${keys})`);
             }
 
-            return `✅ UPDATE [${manga.title}]: ${chapterBaruText} | ${notifLogs.join(',')}`;
+            return `✅ UPDATE [${manga.title}]: ${chapterBaruText} | ${notifLogs.join(', ')}`;
         }
         
         return null;
@@ -149,10 +151,9 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
     } catch (e) {}
 }
 
-// 🔥 FUNGSI TELEGRAM (VERSI TANK: ANTI-BLOKIR & ANTI-TIMEOUT) 🔥
+// 🔥 FUNGSI TELEGRAM (VERSI TANK: ANTI-BLOKIR) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
-        // 1. BERSIHKAN TOKEN
         const cleanToken = token ? token.toString().replace(/[^a-zA-Z0-9:-]/g, '') : "";
         const cleanChatId = chatId ? chatId.toString().replace(/[^0-9-]/g, '') : "";
 
@@ -161,34 +162,28 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        // URL Telegram Asli
+        // URL Telegram
         const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
 
-        // --- STRATEGI 1: DIRECT (Jalur Utama) ---
+        // 1. Direct
         try {
             const res = await fetch(tgUrl, { method: "POST" });
             if (res.ok) return "OK (Direct)";
-        } catch (e) {
-            console.log("Direct fail, switching to proxy...");
-        }
+        } catch (e) { }
 
-        // --- STRATEGI 2: CORSPROXY.IO (Jalur Cepat) ---
+        // 2. CorsProxy
         try {
             const proxy1 = `https://corsproxy.io/?${encodeURIComponent(tgUrl)}`;
             const res1 = await fetch(proxy1, { signal: AbortSignal.timeout(8000) }); 
             if (res1.ok) return "OK (CorsProxy)";
-        } catch (e) {
-            console.log("CorsProxy fail, switching to backup...");
-        }
+        } catch (e) { }
 
-        // --- STRATEGI 3: ALLORIGINS (Jalur Cadangan) ---
+        // 3. AllOrigins
         try {
             const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(tgUrl)}`;
             const res2 = await fetch(proxy2, { signal: AbortSignal.timeout(10000) });
             if (res2.ok) return "OK (AllOrigins)";
-            
-            const errText = await res2.text();
-            return `Fail AllProxies: ${res2.status}`;
+            return `Fail Proxy 408`;
         } catch (e) {
             return `Ex AllProxies: ${e.message}`;
         }
