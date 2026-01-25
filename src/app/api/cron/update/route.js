@@ -1,5 +1,6 @@
 import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js"; // Tambahkan ini
 
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
@@ -11,6 +12,18 @@ export async function GET(request) {
     console.log("🚀 [FINAL-CRON-WEB] Job Started...");
     const startTime = Date.now();
 
+    // 1. SETUP SUPABASE CLIENT (Untuk ambil token dari user_settings)
+    // Pastikan Env Var ini ada di project Web juga
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
+    let supabase = null;
+
+    if (supabaseUrl && supabaseKey) {
+        supabase = createClient(supabaseUrl, supabaseKey);
+    } else {
+        console.log("⚠️ Warning: Supabase Env Missing in Web Cron");
+    }
+
     try {
         let collections = await prisma.collection.findMany({
             include: { user: true }
@@ -18,7 +31,6 @@ export async function GET(request) {
 
         if (collections.length === 0) return NextResponse.json({ message: "Koleksi kosong." });
         
-        // Acak antrian
         collections = collections.sort(() => Math.random() - 0.5);
 
         const BATCH_SIZE = 5; 
@@ -32,7 +44,8 @@ export async function GET(request) {
             }
 
             const batch = collections.slice(i, i + BATCH_SIZE);
-            const results = await Promise.all(batch.map(manga => checkSingleManga(manga)));
+            // Kirim 'supabase' ke fungsi cek
+            const results = await Promise.all(batch.map(manga => checkSingleManga(manga, supabase)));
             
             results.forEach(res => {
                 if (res) logs.push(res);
@@ -49,7 +62,7 @@ export async function GET(request) {
     }
 }
 
-async function checkSingleManga(manga) {
+async function checkSingleManga(manga, supabase) {
     let targetApiUrl = "";
 
     try {
@@ -99,7 +112,7 @@ async function checkSingleManga(manga) {
             
             if (cleanOld === cleanNew && cleanOld !== "") return null; 
 
-            // 1. Update Database
+            // 1. Update Database Prisma
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
@@ -107,21 +120,43 @@ async function checkSingleManga(manga) {
 
             const notifLogs = [];
 
+            // 🔥 FIX UTAMA: AMBIL TOKEN DARI SUPABASE (Bukan Prisma User) 🔥
+            let tgToken = null;
+            let tgChatId = null;
+            let discordWebhook = null;
+
+            if (supabase && manga.userId) {
+                // Tembak langsung tabel 'user_settings'
+                const { data: settings } = await supabase
+                    .from('user_settings')
+                    .select('*')
+                    .eq('user_id', manga.userId)
+                    .maybeSingle(); // Pakai maybeSingle biar gak error kalau null
+
+                if (settings) {
+                    tgToken = settings.telegram_bot_token;
+                    tgChatId = settings.telegram_chat_id;
+                    discordWebhook = settings.discord_webhook;
+                }
+            }
+
+            // Fallback: Kalau di user_settings kosong, coba cek di Prisma User (Jaga-jaga)
+            if (!tgToken) tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token;
+            if (!tgChatId) tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id;
+            if (!discordWebhook) discordWebhook = manga.user?.webhookUrl;
+
             // 2. Kirim Discord
-            if (manga.user?.webhookUrl) {
-                await sendDiscord(manga.user.webhookUrl, manga.title, chapterBaruText, manga.image);
+            if (discordWebhook) {
+                await sendDiscord(discordWebhook, manga.title, chapterBaruText, manga.image);
                 notifLogs.push("DC");
             }
 
             // 3. Kirim Telegram
-            const tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token;
-            const tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id;
-
             if (tgToken && tgChatId) {
                 const status = await sendTelegram(tgToken, tgChatId, manga.title, chapterBaruText, manga.image);
                 notifLogs.push(`TG: ${status}`);
             } else {
-                notifLogs.push("TG: Skip (No Token)");
+                notifLogs.push("TG: Skip (Token Not Found in Settings)");
             }
 
             return `✅ UPDATE [${manga.title}]: ${chapterBaruText} | ${notifLogs.join(', ')}`;
@@ -159,47 +194,34 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        // URL ASLI (GET request agar sama dengan manual test browser kamu)
-        // Kita encode text agar karakter spasi/emoji aman
+        // URL ASLI
         const tgParams = `chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
         const tgPath = `/bot${cleanToken}/sendMessage?${tgParams}`;
-        
         const targetUrl = `https://api.telegram.org${tgPath}`;
 
-        // --- STRATEGI 1: DIRECT (Coba POST dulu siapa tau lolos) ---
+        // STRATEGI 1: DIRECT
         try {
             const res = await fetch(targetUrl, { method: "POST" });
             if (res.ok) return "OK (Direct)";
         } catch (e) { }
 
-        // --- STRATEGI 2: CORSPROXY.IO (Jalur Utama - Biasanya paling stabil) ---
+        // STRATEGI 2: CORSPROXY
         try {
             const proxy1 = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
             const res1 = await fetch(proxy1, { signal: AbortSignal.timeout(8000) });
-            // Cek isi respon untuk memastikan benar-benar sukses dari Telegram
             if (res1.ok) {
                 const json = await res1.json();
                 if (json.ok) return "OK (CorsProxy)";
             }
         } catch (e) { }
 
-        // --- STRATEGI 3: THINGPROXY (Jalur Cadangan 1) ---
+        // STRATEGI 3: THINGPROXY
         try {
             const proxy2 = `https://thingproxy.freeboard.io/fetch/${targetUrl}`;
             const res2 = await fetch(proxy2, { signal: AbortSignal.timeout(8000) });
             if (res2.ok) {
                 const json = await res2.json();
                 if (json.ok) return "OK (ThingProxy)";
-            }
-        } catch (e) { }
-
-        // --- STRATEGI 4: CODETABS (Jalur Cadangan 2) ---
-        try {
-            const proxy3 = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`;
-            const res3 = await fetch(proxy3, { signal: AbortSignal.timeout(8000) });
-            if (res3.ok) {
-                const json = await res3.json();
-                if (json.ok) return "OK (CodeTabs)";
             }
         } catch (e) { }
 
