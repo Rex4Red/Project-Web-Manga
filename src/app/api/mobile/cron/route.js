@@ -26,14 +26,13 @@ export async function GET(request) {
         if (error) throw error;
         if (!bookmarks || bookmarks.length === 0) return NextResponse.json({ message: "Tidak ada bookmark." });
 
-        // Ambil settings untuk semua user yang punya bookmark
         const userIds = [...new Set(bookmarks.map(b => b.user_id))];
         const { data: settingsData } = await supabase.from('user_settings').select('*').in('user_id', userIds);
 
-        // --- 3. MULAI CEK ---
+        // --- 3. MULAI CEK (Batching) ---
         const BATCH_SIZE = 3; 
         for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
-            // Timeout Check
+            // Timeout Prevention
             if ((Date.now() - startTime) > 55000) {
                 logs.push("⚠️ FORCE STOP: Waktu habis.");
                 break;
@@ -47,7 +46,7 @@ export async function GET(request) {
                 if (res && res.includes("✅ UPDATE")) updatesFound++;
             });
 
-            // Jeda sedikit biar server target gak marah
+            // Jeda Napas
             if (i + BATCH_SIZE < bookmarks.length) await new Promise(r => setTimeout(r, 1000));
         }
 
@@ -58,7 +57,7 @@ export async function GET(request) {
     }
 }
 
-// --- FUNGSI UTAMA PENGECEKAN ---
+// --- FUNGSI CEK UPDATE ---
 async function checkMangaUpdate(item, supabase, allSettings) {
     try {
         let latestChapter = "";
@@ -67,16 +66,17 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             "Referer": "https://google.com",
         };
 
-        // --- A. LOGIKA SCRAPING (Sesuai kode kamu yang sudah aman) ---
+        // A. SCRAPING SHINIGAMI
         if (item.source === 'shinigami') {
             const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers });
             if (res.ok) {
                 try {
                     const json = await res.json();
                     if (json.data?.latest_chapter_number) latestChapter = `Chapter ${json.data.latest_chapter_number}`;
-                } catch (e) { return `⚠️ [${item.title}] Gagal Parse JSON Shinigami`; }
+                } catch (e) { return `⚠️ [${item.title}] Gagal Parse JSON`; }
             }
         } 
+        // B. SCRAPING KOMIKINDO
         else if (item.source === 'komikindo') {
             let cleanId = item.manga_id;
             if (/^\d+-/.test(cleanId)) cleanId = cleanId.replace(/^\d+-/, '');
@@ -87,52 +87,44 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             if (res.ok) {
                 const html = await res.text();
                 const $ = cheerio.load(html);
-                
                 let rawText = $('#chapter_list .lchx a').first().text();       
                 if (!rawText) rawText = $('.chapter-list li:first-child a').text();
                 if (!rawText) rawText = $('#chapter_list li:first-child a').text(); 
-                
-                if (rawText) {
-                    latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
-                }
+                if (rawText) latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
             }
         }
 
-        // --- B. LOGIKA UPDATE & NOTIFIKASI ---
+        // C. CEK PERUBAHAN
         if (latestChapter) {
-            // Bersihkan angka untuk perbandingan
             const cleanOld = item.last_chapter ? item.last_chapter.replace(/[^0-9.]/g, '') : "0";
             const cleanNew = latestChapter.replace(/[^0-9.]/g, '');
             
-            // Debug: Kalau sama, info saja
-            if (cleanOld === cleanNew && item.last_chapter !== null) {
-                return `ℹ️ [${item.title}] SAMA (${item.last_chapter})`;
-            }
+            if (cleanOld === cleanNew && item.last_chapter !== null) return `ℹ️ [${item.title}] SAMA`;
 
-            // Kalau BEDA -> Update Database
+            // Update Database
             await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
 
-            // --- C. KIRIM NOTIFIKASI (YANG SEBELUMNYA BERMASALAH) ---
+            // Kirim Notifikasi
             let notifLog = [];
             const userSetting = allSettings.find(s => s.user_id === item.user_id);
             
             if (userSetting) {
-                // 1. Cek Discord
+                // Discord
                 if (userSetting.discord_webhook && userSetting.discord_webhook.startsWith("http")) {
                     const status = await sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover);
                     notifLog.push(`DC: ${status}`);
                 }
                 
-                // 2. Cek Telegram
+                // Telegram (DEBUG VERSION)
                 if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
                     const status = await sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover);
                     notifLog.push(`TG: ${status}`);
                 }
             } else {
-                notifLog.push("No Settings Found");
+                notifLog.push("No Settings");
             }
 
-            return `✅ UPDATE [${item.title}]: ${latestChapter} | Notif: [${notifLog.join(', ')}]`;
+            return `✅ UPDATE [${item.title}]: ${latestChapter} | ${notifLog.join(', ')}`;
         }
         
         return null;
@@ -142,9 +134,8 @@ async function checkMangaUpdate(item, supabase, allSettings) {
     }
 }
 
-// --- HELPER FETCH ---
+// --- HELPER PROXY FETCH ---
 async function fetchSmart(url, options = {}) {
-    // (Kode fetchSmart sama seperti sebelumnya, tidak diubah karena sudah aman)
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(5000) });
         if (res.ok) return res;
@@ -165,63 +156,37 @@ async function fetchSmart(url, options = {}) {
     }
 }
 
-// --- FUNGSI KIRIM DISCORD (DIPERBAIKI) ---
+// --- KIRIM DISCORD ---
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     try {
-        // Validasi cover, kalau null/kosong ganti placeholder biar discord gak nolak
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
-
-        const res = await fetch(webhookUrl, {
-            method: "POST", 
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                username: "Manga Bot", 
-                embeds: [{ 
-                    title: `${title} Update!`, 
-                    description: `Telah rilis **${chapter}**`, 
-                    color: 5763719, // Warna Hijau
-                    image: { url: safeCover },
-                    footer: { text: "Rex4Red Manga Mobile" }
-                }] 
-            })
+        await fetch(webhookUrl, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: "Manga Bot", embeds: [{ title: `${title} Update!`, description: `**${chapter}**`, color: 5763719, image: { url: safeCover } }] })
         });
-        
-        if (res.ok) return "OK";
-        return `Err ${res.status}`; // Jika gagal, return status code
-    } catch (e) {
-        return `Fail (${e.message})`;
-    }
+        return "OK";
+    } catch (e) { return "Fail"; }
 }
 
-// --- FUNGSI KIRIM TELEGRAM (VERSI FINAL & BERSIH) ---
+// --- KIRIM TELEGRAM (DEBUG TOKEN) ---
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
-        // 🔥 INI KUNCINYA: Hapus spasi/enter nakal secara paksa!
-        // Biarpun database kotor, kode ini akan membersihkannya.
+        // 🔥 MEMBERSIHKAN TOKEN 🔥
         const cleanToken = token ? token.toString().trim().replace(/\s/g, '') : "";
         const cleanChatId = chatId ? chatId.toString().trim().replace(/\s/g, '') : "";
 
-        if (!cleanToken || !cleanChatId) return "Err: Token/ChatID kosong";
+        // Log panjang token untuk debugging
+        const debugInfo = `(Len: ${cleanToken.length})`; 
+
+        if (!cleanToken || !cleanChatId) return `Err Empty ${debugInfo}`;
 
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        // Coba kirim Foto dulu
-        const res = await fetch(`https://api.telegram.org/bot${cleanToken}/sendPhoto`, {
-            method: "POST", 
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                chat_id: cleanChatId, 
-                photo: safeCover, 
-                caption: text, 
-                parse_mode: 'Markdown' 
-            })
-        });
-
-        if (res.ok) return "OK";
-
-        // Fallback ke Text Only jika foto gagal
-        await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+        const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+        
+        // Kirim Text Dulu (Lebih Stabil)
+        const res = await fetch(url, {
             method: "POST", 
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
@@ -231,9 +196,12 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
             })
         });
 
-        return "OK (Fallback)";
+        if (res.ok) return `OK ${debugInfo}`;
+        
+        const errText = await res.text();
+        return `Fail ${res.status} ${debugInfo}: ${errText.substring(0, 30)}`;
 
     } catch (e) {
-        return `Fail: ${e.message}`;
+        return `Ex ${e.message}`;
     }
 }
