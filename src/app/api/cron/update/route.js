@@ -16,7 +16,7 @@ export async function GET(request) {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
     let supabase = null;
-    let envStatus = "MISSING"; // Default status
+    let envStatus = "MISSING"; 
 
     if (supabaseUrl && supabaseKey) {
         supabase = createClient(supabaseUrl, supabaseKey);
@@ -43,7 +43,6 @@ export async function GET(request) {
             }
 
             const batch = collections.slice(i, i + BATCH_SIZE);
-            // Kirim 'envStatus' juga untuk log
             const results = await Promise.all(batch.map(manga => checkSingleManga(manga, supabase, envStatus)));
             
             results.forEach(res => {
@@ -119,17 +118,21 @@ async function checkSingleManga(manga, supabase, envStatus) {
 
             const notifLogs = [];
 
-            // 2. AMBIL TOKEN (DENGAN DEBUG)
+            // 🔥 FIX: CARI ID USER YANG BENAR 🔥
+            // Coba ambil dari manga.userId, kalau null ambil dari manga.user.id
+            const uid = manga.userId || manga.user?.id;
+
+            // 2. AMBIL TOKEN
             let tgToken = null;
             let tgChatId = null;
             let discordWebhook = null;
             let debugMsg = "";
 
-            if (supabase && manga.userId) {
+            if (supabase && uid) {
                 const { data: settings, error } = await supabase
                     .from('user_settings')
                     .select('*')
-                    .eq('user_id', manga.userId)
+                    .eq('user_id', uid) // Pakai UID yang sudah dipastikan ada
                     .maybeSingle();
 
                 if (settings) {
@@ -141,10 +144,10 @@ async function checkSingleManga(manga, supabase, envStatus) {
                     debugMsg = `Null (Err: ${error?.message || 'None'})`;
                 }
             } else {
-                debugMsg = "Skip (Supabase/UserID Missing)";
+                debugMsg = "Skip (Supabase Missing or UserID undefined)";
             }
 
-            // Fallback Prisma
+            // Fallback Prisma (Jaga-jaga)
             if (!tgToken) tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token;
             if (!tgChatId) tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id;
             if (!discordWebhook) discordWebhook = manga.user?.webhookUrl;
@@ -160,8 +163,8 @@ async function checkSingleManga(manga, supabase, envStatus) {
                 const status = await sendTelegram(tgToken, tgChatId, manga.title, chapterBaruText, manga.image);
                 notifLogs.push(`TG: ${status}`);
             } else {
-                // 🔥 LOG DEBUGGING LENGKAP 🔥
-                notifLogs.push(`TG: Skip [Env:${envStatus}, UID:${manga.userId}, DB:${debugMsg}]`);
+                // Log UID untuk debugging
+                notifLogs.push(`TG: Skip [Env:${envStatus}, UID:${uid}, DB:${debugMsg}]`);
             }
 
             return `✅ UPDATE [${manga.title}]: ${chapterBaruText} | ${notifLogs.join(', ')}`;
