@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 const MY_APP_URL = "https://rex4red-komik-api-scrape.hf.space";
 
 export async function GET(request) {
-    console.log("🚀 [FINAL-CRON] Job Started...");
+    console.log("🚀 [FINAL-CRON-WEB] Job Started...");
     const startTime = Date.now();
 
     try {
@@ -18,7 +18,7 @@ export async function GET(request) {
 
         if (collections.length === 0) return NextResponse.json({ message: "Koleksi kosong." });
         
-        // Acak antrian
+        // Acak antrian biar beban server target terdistribusi
         collections = collections.sort(() => Math.random() - 0.5);
 
         const BATCH_SIZE = 5; 
@@ -55,18 +55,16 @@ async function checkSingleManga(manga) {
     try {
         let chapterBaruText = "";
 
-        // 🔥 LOGIKA DETEKSI YANG BENAR (WAJIB > 30) 🔥
+        // --- DETEKSI SOURCE ---
         let isShinigami = false;
         if (manga.source) {
             isShinigami = manga.source.toLowerCase().includes('shinigami');
         } else {
-            // UUID panjangnya 36, jadi harus > 30 biar kedeteksi
             isShinigami = manga.mangaId.length > 30 || /^\d+$/.test(manga.mangaId);
         }
 
+        // --- SCRAPING LOGIC ---
         if (isShinigami) {
-            // --- JALUR SHINIGAMI (API LUAR) ---
-            // UUID (Absolute Regression, Patron of Villains) akan masuk sini
             targetApiUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${manga.mangaId}`;
             const res = await fetch(targetApiUrl, { next: { revalidate: 0 } });
             
@@ -75,17 +73,11 @@ async function checkSingleManga(manga) {
                 if (json.data?.latest_chapter_number) {
                     chapterBaruText = `Chapter ${json.data.latest_chapter_number}`;
                 }
-            } 
-            // Kalau Shinigami error, kita silent skip aja (jangan bikin merah log)
-            else {
-                return null; 
+            } else {
+                return null; // Silent skip
             }
-
         } else {
-            // --- JALUR KOMIKINDO (API SENDIRI) ---
-            // Slug pendek (Weapon Eating Bastard, One Piece) masuk sini
             targetApiUrl = `${MY_APP_URL}/komik/detail/${encodeURIComponent(manga.mangaId)}`;
-
             const res = await fetch(targetApiUrl, { 
                 method: 'GET',
                 headers: { 'Cache-Control': 'no-cache' },
@@ -93,32 +85,47 @@ async function checkSingleManga(manga) {
             });
 
             if (!res.ok) {
-                // Khusus "Weapon-Eating Bastard", kalau masuk sini & error, berarti slugnya salah
                 return `❌ SLUG SALAH [${manga.title}] -> 404 di API Internal`;
             }
 
             const json = await res.json();
-            
             if (json.status && json.data && json.data.chapters && json.data.chapters.length > 0) {
                 chapterBaruText = json.data.chapters[0].title;
             }
         }
 
-        // --- UPDATE DATABASE ---
+        // --- LOGIKA UPDATE & NOTIFIKASI ---
         if (chapterBaruText && manga.lastChapter !== chapterBaruText) {
             const cleanOld = manga.lastChapter ? manga.lastChapter.replace(/[^0-9.]/g, '') : "0";
             const cleanNew = chapterBaruText.replace(/[^0-9.]/g, '');
             
             if (cleanOld === cleanNew && cleanOld !== "") return null; 
 
+            // 1. Update Database Prisma
             await prisma.collection.update({
                 where: { id: manga.id },
                 data: { lastChapter: chapterBaruText }
             });
 
-            if (manga.user?.webhookUrl) sendDiscord(manga.user.webhookUrl, manga.title, chapterBaruText, manga.image);
+            const notifLogs = [];
 
-            return `✅ UPDATE [${manga.title}]: ${chapterBaruText}`;
+            // 2. Kirim Discord (Jika ada)
+            if (manga.user?.webhookUrl) {
+                await sendDiscord(manga.user.webhookUrl, manga.title, chapterBaruText, manga.image);
+                notifLogs.push("DC");
+            }
+
+            // 3. Kirim Telegram (Jika ada)
+            // Cek field camelCase (Prisma default) atau snake_case (Raw DB)
+            const tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token;
+            const tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id;
+
+            if (tgToken && tgChatId) {
+                const status = await sendTelegram(tgToken, tgChatId, manga.title, chapterBaruText, manga.image);
+                notifLogs.push(`TG: ${status}`);
+            }
+
+            return `✅ UPDATE [${manga.title}]: ${chapterBaruText} | ${notifLogs.join(',')}`;
         }
         
         return null;
@@ -129,5 +136,64 @@ async function checkSingleManga(manga) {
 }
 
 async function sendDiscord(webhookUrl, title, chapter, cover) {
-    try { await fetch(webhookUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "Manga Bot", content: `@everyone ${title} ${chapter}`, embeds: [{ title, description: chapter, image: { url: cover } }] }) }); } catch (e) {}
+    try { 
+        await fetch(webhookUrl, { 
+            method: "POST", 
+            headers: { "Content-Type": "application/json" }, 
+            body: JSON.stringify({ 
+                username: "Manga Bot", 
+                content: `@everyone ${title} ${chapter}`, 
+                embeds: [{ title, description: chapter, image: { url: cover } }] 
+            }) 
+        }); 
+    } catch (e) {}
+}
+
+// 🔥 FUNGSI TELEGRAM (VERSI TANK: ANTI-BLOKIR & ANTI-TIMEOUT) 🔥
+async function sendTelegram(token, chatId, title, chapter, cover) {
+    try {
+        // 1. BERSIHKAN TOKEN
+        const cleanToken = token ? token.toString().replace(/[^a-zA-Z0-9:-]/g, '') : "";
+        const cleanChatId = chatId ? chatId.toString().replace(/[^0-9-]/g, '') : "";
+
+        if (!cleanToken || !cleanChatId) return "Err: Data Kosong";
+
+        const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
+        const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
+
+        // URL Telegram Asli
+        const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
+
+        // --- STRATEGI 1: DIRECT (Jalur Utama) ---
+        try {
+            const res = await fetch(tgUrl, { method: "POST" });
+            if (res.ok) return "OK (Direct)";
+        } catch (e) {
+            console.log("Direct fail, switching to proxy...");
+        }
+
+        // --- STRATEGI 2: CORSPROXY.IO (Jalur Cepat) ---
+        try {
+            const proxy1 = `https://corsproxy.io/?${encodeURIComponent(tgUrl)}`;
+            const res1 = await fetch(proxy1, { signal: AbortSignal.timeout(8000) }); 
+            if (res1.ok) return "OK (CorsProxy)";
+        } catch (e) {
+            console.log("CorsProxy fail, switching to backup...");
+        }
+
+        // --- STRATEGI 3: ALLORIGINS (Jalur Cadangan) ---
+        try {
+            const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(tgUrl)}`;
+            const res2 = await fetch(proxy2, { signal: AbortSignal.timeout(10000) });
+            if (res2.ok) return "OK (AllOrigins)";
+            
+            const errText = await res2.text();
+            return `Fail AllProxies: ${res2.status}`;
+        } catch (e) {
+            return `Ex AllProxies: ${e.message}`;
+        }
+
+    } catch (e) {
+        return `Ex Fatal: ${e.message}`;
+    }
 }
