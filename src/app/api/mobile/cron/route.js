@@ -150,45 +150,48 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
 }
 
 // 🔥 FUNGSI TELEGRAM (VERSI REGEX GANAS) 🔥
+// 🔥 FUNGSI TELEGRAM (VERSI ANTI-BLOKIR / PROXY) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
-    // Variable debug untuk melihat apa yang sebenarnya dikirim
-    let debugTokenLen = 0;
-    
     try {
-        // 1. PEMBERSIHAN EKSTREM
-        // Regex ini membuang SEMUA karakter KECUALI Huruf, Angka, dan tanda baca token (:)
+        // 1. BERSIHKAN TOKEN
         const cleanToken = token ? token.toString().replace(/[^a-zA-Z0-9:-]/g, '') : "";
         const cleanChatId = chatId ? chatId.toString().replace(/[^0-9-]/g, '') : "";
 
-        debugTokenLen = cleanToken.length; // Simpan panjang token bersih
-
-        if (!cleanToken || !cleanChatId) return "Err: Token/ChatID Kosong";
+        if (!cleanToken || !cleanChatId) return "Err: Data Kosong";
 
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+        // 2. COBA KIRIM LANGSUNG (Direct)
+        // Kita coba cara normal dulu...
+        try {
+            const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+            const res = await fetch(url, {
+                method: "POST", 
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                    chat_id: cleanChatId, 
+                    text: text, 
+                    parse_mode: 'Markdown' 
+                })
+            });
+            if (res.ok) return "OK (Direct)";
+        } catch (e) {
+            console.log("Direct TG failed, trying proxy...");
+        }
 
-        // 2. KIRIM SEBAGAI TEXT SAJA (Lebih Stabil daripada Photo)
-        const res = await fetch(url, {
-            method: "POST", 
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                chat_id: cleanChatId, 
-                text: text, 
-                parse_mode: 'Markdown',
-                disable_web_page_preview: false
-            })
-        });
-
-        if (res.ok) return `OK (Len:${debugTokenLen})`;
+        // 3. JIKA GAGAL, LEWAT JALUR TIKUS (Proxy)
+        // HuggingFace memblokir Telegram? Kita lewat AllOrigins!
+        const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
+        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(tgUrl)}`;
         
-        const errText = await res.text();
-        // Return pesan error dari Telegram
-        return `Fail TG ${res.status}: ${errText.substring(0, 30)} (Len:${debugTokenLen})`;
+        const resProxy = await fetch(proxyUrl);
+        if (resProxy.ok) return "OK (Proxy)";
+
+        const errText = await resProxy.text();
+        return `Fail Proxy ${resProxy.status}: ${errText.substring(0, 30)}`;
 
     } catch (e) {
-        // Kalau masih error fetch failed, berarti URL benar-benar rusak parah
-        return `Ex: ${e.message} (Len:${debugTokenLen})`;
+        return `Ex: ${e.message}`;
     }
 }
