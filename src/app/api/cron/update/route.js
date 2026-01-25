@@ -1,6 +1,6 @@
 import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js"; // Tambahkan ini
+import { createClient } from "@supabase/supabase-js";
 
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
@@ -9,19 +9,18 @@ export const dynamic = 'force-dynamic';
 const MY_APP_URL = "https://rex4red-komik-api-scrape.hf.space";
 
 export async function GET(request) {
-    console.log("🚀 [FINAL-CRON-WEB] Job Started...");
+    console.log("🚀 [DEBUG-CRON-WEB] Job Started...");
     const startTime = Date.now();
 
-    // 1. SETUP SUPABASE CLIENT (Untuk ambil token dari user_settings)
-    // Pastikan Env Var ini ada di project Web juga
+    // 1. CEK ENV VARS
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
     let supabase = null;
+    let envStatus = "MISSING"; // Default status
 
     if (supabaseUrl && supabaseKey) {
         supabase = createClient(supabaseUrl, supabaseKey);
-    } else {
-        console.log("⚠️ Warning: Supabase Env Missing in Web Cron");
+        envStatus = "OK";
     }
 
     try {
@@ -44,8 +43,8 @@ export async function GET(request) {
             }
 
             const batch = collections.slice(i, i + BATCH_SIZE);
-            // Kirim 'supabase' ke fungsi cek
-            const results = await Promise.all(batch.map(manga => checkSingleManga(manga, supabase)));
+            // Kirim 'envStatus' juga untuk log
+            const results = await Promise.all(batch.map(manga => checkSingleManga(manga, supabase, envStatus)));
             
             results.forEach(res => {
                 if (res) logs.push(res);
@@ -62,7 +61,7 @@ export async function GET(request) {
     }
 }
 
-async function checkSingleManga(manga, supabase) {
+async function checkSingleManga(manga, supabase, envStatus) {
     let targetApiUrl = "";
 
     try {
@@ -120,43 +119,49 @@ async function checkSingleManga(manga, supabase) {
 
             const notifLogs = [];
 
-            // 🔥 FIX UTAMA: AMBIL TOKEN DARI SUPABASE (Bukan Prisma User) 🔥
+            // 2. AMBIL TOKEN (DENGAN DEBUG)
             let tgToken = null;
             let tgChatId = null;
             let discordWebhook = null;
+            let debugMsg = "";
 
             if (supabase && manga.userId) {
-                // Tembak langsung tabel 'user_settings'
-                const { data: settings } = await supabase
+                const { data: settings, error } = await supabase
                     .from('user_settings')
                     .select('*')
                     .eq('user_id', manga.userId)
-                    .maybeSingle(); // Pakai maybeSingle biar gak error kalau null
+                    .maybeSingle();
 
                 if (settings) {
                     tgToken = settings.telegram_bot_token;
                     tgChatId = settings.telegram_chat_id;
                     discordWebhook = settings.discord_webhook;
+                    debugMsg = "Found";
+                } else {
+                    debugMsg = `Null (Err: ${error?.message || 'None'})`;
                 }
+            } else {
+                debugMsg = "Skip (Supabase/UserID Missing)";
             }
 
-            // Fallback: Kalau di user_settings kosong, coba cek di Prisma User (Jaga-jaga)
+            // Fallback Prisma
             if (!tgToken) tgToken = manga.user?.telegramBotToken || manga.user?.telegram_bot_token;
             if (!tgChatId) tgChatId = manga.user?.telegramChatId || manga.user?.telegram_chat_id;
             if (!discordWebhook) discordWebhook = manga.user?.webhookUrl;
 
-            // 2. Kirim Discord
+            // 3. Kirim Discord
             if (discordWebhook) {
                 await sendDiscord(discordWebhook, manga.title, chapterBaruText, manga.image);
                 notifLogs.push("DC");
             }
 
-            // 3. Kirim Telegram
+            // 4. Kirim Telegram
             if (tgToken && tgChatId) {
                 const status = await sendTelegram(tgToken, tgChatId, manga.title, chapterBaruText, manga.image);
                 notifLogs.push(`TG: ${status}`);
             } else {
-                notifLogs.push("TG: Skip (Token Not Found in Settings)");
+                // 🔥 LOG DEBUGGING LENGKAP 🔥
+                notifLogs.push(`TG: Skip [Env:${envStatus}, UID:${manga.userId}, DB:${debugMsg}]`);
             }
 
             return `✅ UPDATE [${manga.title}]: ${chapterBaruText} | ${notifLogs.join(', ')}`;
@@ -183,7 +188,6 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
     } catch (e) {}
 }
 
-// 🔥 FUNGSI TELEGRAM (REAL TANK VERSION) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
         const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
@@ -199,13 +203,13 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
         const tgPath = `/bot${cleanToken}/sendMessage?${tgParams}`;
         const targetUrl = `https://api.telegram.org${tgPath}`;
 
-        // STRATEGI 1: DIRECT
+        // DIRECT
         try {
             const res = await fetch(targetUrl, { method: "POST" });
             if (res.ok) return "OK (Direct)";
         } catch (e) { }
 
-        // STRATEGI 2: CORSPROXY
+        // CORSPROXY
         try {
             const proxy1 = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
             const res1 = await fetch(proxy1, { signal: AbortSignal.timeout(8000) });
@@ -215,7 +219,7 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
             }
         } catch (e) { }
 
-        // STRATEGI 3: THINGPROXY
+        // THINGPROXY
         try {
             const proxy2 = `https://thingproxy.freeboard.io/fetch/${targetUrl}`;
             const res2 = await fetch(proxy2, { signal: AbortSignal.timeout(8000) });
