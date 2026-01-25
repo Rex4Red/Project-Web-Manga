@@ -193,8 +193,6 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
     }
 }
 
-// --- FUNGSI KIRIM TELEGRAM (DIPERBAIKI) ---
-// --- FUNGSI KIRIM TELEGRAM (VERSI ANTI-GAGAL) ---
 // --- FUNGSI KIRIM TELEGRAM (VERSI FINAL & BERSIH) ---
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
