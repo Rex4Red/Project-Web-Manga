@@ -151,6 +151,7 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
 
 // 🔥 FUNGSI TELEGRAM (VERSI REGEX GANAS) 🔥
 // 🔥 FUNGSI TELEGRAM (VERSI ANTI-BLOKIR / PROXY) 🔥
+// 🔥 FUNGSI TELEGRAM (VERSI TANK: ANTI-BLOKIR & ANTI-TIMEOUT) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
         // 1. BERSIHKAN TOKEN
@@ -162,36 +163,41 @@ async function sendTelegram(token, chatId, title, chapter, cover) {
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
 
-        // 2. COBA KIRIM LANGSUNG (Direct)
-        // Kita coba cara normal dulu...
+        // URL Telegram Asli
+        const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
+
+        // --- STRATEGI 1: DIRECT (Jalur Utama) ---
         try {
-            const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
-            const res = await fetch(url, {
-                method: "POST", 
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
-                    chat_id: cleanChatId, 
-                    text: text, 
-                    parse_mode: 'Markdown' 
-                })
-            });
+            const res = await fetch(tgUrl, { method: "POST" }); // POST terkadang lolos firewall
             if (res.ok) return "OK (Direct)";
         } catch (e) {
-            console.log("Direct TG failed, trying proxy...");
+            console.log("Direct fail, switching to proxy...");
         }
 
-        // 3. JIKA GAGAL, LEWAT JALUR TIKUS (Proxy)
-        // HuggingFace memblokir Telegram? Kita lewat AllOrigins!
-        const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
-        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(tgUrl)}`;
-        
-        const resProxy = await fetch(proxyUrl);
-        if (resProxy.ok) return "OK (Proxy)";
+        // --- STRATEGI 2: CORSPROXY.IO (Jalur Cepat) ---
+        // Proxy ini biasanya jauh lebih ngebut daripada AllOrigins
+        try {
+            const proxy1 = `https://corsproxy.io/?${encodeURIComponent(tgUrl)}`;
+            const res1 = await fetch(proxy1, { signal: AbortSignal.timeout(8000) }); // Timeout 8 detik
+            if (res1.ok) return "OK (CorsProxy)";
+        } catch (e) {
+            console.log("CorsProxy fail, switching to backup...");
+        }
 
-        const errText = await resProxy.text();
-        return `Fail Proxy ${resProxy.status}: ${errText.substring(0, 30)}`;
+        // --- STRATEGI 3: ALLORIGINS (Jalur Cadangan) ---
+        try {
+            const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(tgUrl)}`;
+            const res2 = await fetch(proxy2, { signal: AbortSignal.timeout(10000) }); // Timeout 10 detik
+            if (res2.ok) return "OK (AllOrigins)";
+            
+            // Kalau sampai sini masih gagal, baca errornya
+            const errText = await res2.text();
+            return `Fail AllProxies: ${res2.status} - ${errText.substring(0, 30)}`;
+        } catch (e) {
+            return `Ex AllProxies: ${e.message}`;
+        }
 
     } catch (e) {
-        return `Ex: ${e.message}`;
+        return `Ex Fatal: ${e.message}`;
     }
 }
