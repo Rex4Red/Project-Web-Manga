@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 export const runtime = 'nodejs'; 
 export const dynamic = 'force-dynamic';
 
-// 🔥 FIX URL: Gunakan URL dari Web Project kamu (Satu 'rex4red')
+// URL API Web Kamu (Untuk KomikIndo)
 const KOMIKINDO_BASE = "https://rex4red-komik-api-scrape.hf.space";
 
 export async function GET(request) {
@@ -27,11 +27,11 @@ export async function GET(request) {
         cleanId = cleanId.replace(/^manga-/, '');
         debugLogs.push(`2. Clean ID: ${cleanId}`);
 
-        // --- UNIVERSAL SEARCH (Mirip Web tapi Paralel) ---
+        // --- UNIVERSAL SEARCH (PARALEL) ---
         debugLogs.push("3. Calling Sources...");
 
         const [shinigamiData, komikindoData] = await Promise.all([
-            fetchShinigami(cleanId, debugLogs),
+            fetchShinigamiSmart(cleanId, debugLogs),
             fetchKomikindo(cleanId, debugLogs)
         ]);
 
@@ -74,39 +74,45 @@ export async function GET(request) {
     }
 }
 
-// --- SUMBER 1: SHINIGAMI (Via Sansekai) ---
-async function fetchShinigami(id, logs) {
+// --- FUNGSI 'STEALTH' UNTUK SHINIGAMI ---
+async function fetchShinigamiSmart(id, logs) {
     try {
         const time = Date.now();
-        // Coba ID murni dulu
-        let url = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}&t=${time}`;
-        logs.push(`   > [Shinigami] Try 1: ${url}`);
-        
-        let res = await fetch(url, { next: { revalidate: 0 } });
-        
-        // Kalau gagal, coba tambah 'manga-' (kadang formatnya beda)
+        // Target URL
+        const targetUrl1 = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}&t=${time}`;
+        const targetUrl2 = `https://api.sansekai.my.id/api/komik/detail?manga_id=manga-${id}&t=${time}`;
+
+        // 1. Coba Direct dengan Header Penyamaran
+        let res = await fetchWithHeaders(targetUrl1);
+        logs.push(`   > [Shinigami] Try 1 (Direct): ${res.ok ? 'OK' : res.status}`);
+
+        // 2. Jika gagal, coba ID pakai 'manga-'
         if (!res.ok) {
-            url = `https://api.sansekai.my.id/api/komik/detail?manga_id=manga-${id}&t=${time}`;
-            logs.push(`   > [Shinigami] Try 2: ${url}`);
-            res = await fetch(url, { next: { revalidate: 0 } });
+            res = await fetchWithHeaders(targetUrl2);
+            logs.push(`   > [Shinigami] Try 2 (Manga-Prefix): ${res.ok ? 'OK' : res.status}`);
         }
 
+        // 3. Jika masih gagal (misal 403 Forbidden), PAKAI PROXY
         if (!res.ok) {
-            logs.push(`   > [Shinigami] Failed (${res.status})`);
-            return null;
+            logs.push(`   > [Shinigami] Direct Blocked. Switching to Proxy...`);
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl1)}`;
+            res = await fetch(proxyUrl);
+            logs.push(`   > [Shinigami] Try 3 (Proxy): ${res.ok ? 'OK' : res.status}`);
         }
+
+        if (!res.ok) return null;
 
         const json = await res.json();
         if (!json.data || !json.data.chapters) return null;
 
-        // Mapping Data (Format Flutter)
+        // Sukses! Mapping Data
         return {
             title: json.data.title,
             cover: json.data.thumbnail,
             synopsis: json.data.synopsis,
             chapters: json.data.chapters.map(ch => ({
                 title: `Chapter ${ch.chapter_number}`,
-                id: ch.href, // Penting: Ini endpoint baca
+                id: ch.href,
                 date: ch.release_date
             }))
         };
@@ -116,10 +122,21 @@ async function fetchShinigami(id, logs) {
     }
 }
 
-// --- SUMBER 2: KOMIKINDO (Via API Web Kamu) ---
+// Helper: Fetch dengan Header "Manusia"
+async function fetchWithHeaders(url) {
+    return fetch(url, {
+        headers: {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+            "Referer": "https://google.com",
+            "Accept": "application/json"
+        },
+        next: { revalidate: 0 }
+    });
+}
+
+// --- FUNGSI KOMIKINDO ---
 async function fetchKomikindo(id, logs) {
     try {
-        // Gunakan URL yang sama persis dengan Web Code kamu (tanpa /api di tengah)
         const url = `${KOMIKINDO_BASE}/komik/detail/${id}`;
         logs.push(`   > [KomikIndo] Try: ${url}`);
 
@@ -135,11 +152,7 @@ async function fetchKomikindo(id, logs) {
 
         if (!data || !data.title) return null;
 
-        // Mapping Data (Format Flutter)
-        // Kita ambil cover dari thumb/image/thumbnail (mirip Web Code)
         const cover = data.thumb || data.image || data.thumbnail;
-        
-        // Handle variasi list chapter
         const rawChapters = data.chapter_list || data.chapters || data.list_chapter || [];
         
         return {
@@ -147,18 +160,17 @@ async function fetchKomikindo(id, logs) {
             cover: cover,
             synopsis: data.synopsis || "Deskripsi tidak tersedia",
             chapters: rawChapters.map(ch => {
-                // Bersihkan ID chapter seperti di Web Code
                 let chId = ch.endpoint || ch.id || ch.link || '';
                 chId = chId.replace('https://komikindo.ch/', '')
                            .replace('/komik/', '')
-                           .replace(/\/$/, ''); // Hapus slash akhir
+                           .replace(/\/$/, '');
                 
                 return {
                     title: ch.name || ch.title,
                     id: chId,
                     date: ch.date || ch.uploaded_on || ''
                 };
-            }).filter(c => c.id) // Hapus yang id-nya kosong
+            }).filter(c => c.id)
         };
 
     } catch (e) {
