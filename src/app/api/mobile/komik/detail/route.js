@@ -3,8 +3,8 @@ import { NextResponse } from "next/server";
 export const runtime = 'nodejs'; 
 export const dynamic = 'force-dynamic';
 
-// Base URL API Kamu sendiri (Sesuai screenshot Swagger kamu)
-const MY_API_BASE = "https://rex4red-rex4red-komik-api-scrape.hf.space";
+// 🔥 FIX UTAMA: Tambahkan '/api' di sini!
+const MY_API_BASE = "https://rex4red-rex4red-komik-api-scrape.hf.space/api";
 
 export async function GET(request) {
     const { searchParams } = new URL(request.url);
@@ -20,18 +20,15 @@ export async function GET(request) {
     try {
         // --- BERSIHKAN ID ---
         let cleanId = rawId;
-        // Jika ID berupa URL full, ambil slug paling belakang
         if (cleanId.startsWith('http')) {
             const parts = cleanId.replace(/\/$/, '').split('/');
             cleanId = parts[parts.length - 1];
         }
-        // Hapus 'manga-' jika ada (biar seragam)
         cleanId = cleanId.replace(/^manga-/, '');
         
         debugLogs.push(`2. Clean ID: ${cleanId}`);
 
         // --- BALAPAN API (PARALEL) ---
-        // Kita panggil Sansekai (untuk Shinigami) dan API Kamu (untuk KomikIndo) berbarengan
         debugLogs.push("3. Calling External APIs...");
 
         const [shinigamiData, komikindoData] = await Promise.all([
@@ -81,12 +78,12 @@ export async function GET(request) {
 // --- FUNGSI KE API SANSEKAI (SHINIGAMI) ---
 async function fetchFromSansekai(id, logs) {
     try {
-        // Coba 1: Pakai ID bersih (misal: leveling-with-the-gods)
+        // Coba 1: ID Bersih
         let url = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}`;
         logs.push(`   > [Sansekai] Try 1: ${url}`);
         let res = await fetch(url, { next: { revalidate: 0 } });
         
-        // Coba 2: Tambah 'manga-' (Kadang API Sansekai butuh ini)
+        // Coba 2: Tambah 'manga-'
         if (!res.ok) {
             url = `https://api.sansekai.my.id/api/komik/detail?manga_id=manga-${id}`;
             logs.push(`   > [Sansekai] Try 2: ${url}`);
@@ -101,7 +98,6 @@ async function fetchFromSansekai(id, logs) {
         const json = await res.json();
         if (!json.data || !json.data.chapters) return null;
 
-        // Mapping agar sesuai format Mobile App
         return {
             title: json.data.title,
             cover: json.data.thumbnail,
@@ -121,13 +117,12 @@ async function fetchFromSansekai(id, logs) {
 // --- FUNGSI KE API KAMU SENDIRI (KOMIKINDO) ---
 async function fetchFromMyApi(id, logs) {
     try {
-        // Endpoint API Kamu: /komik/detail/{endpoint}
+        // Endpoint Sekarang Menjadi: .../api/komik/detail/{id}
         const url = `${MY_API_BASE}/komik/detail/${id}`;
         logs.push(`   > [KomikIndo/Local] Try: ${url}`);
 
-        // Gunakan timeout agar tidak hang kalau server sendiri lemot
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 detik timeout
+        const timeoutId = setTimeout(() => controller.abort(), 8000); 
 
         const res = await fetch(url, { 
             next: { revalidate: 0 },
@@ -141,24 +136,20 @@ async function fetchFromMyApi(id, logs) {
         }
 
         const json = await res.json();
-        
-        // Cek struktur response API kamu (biasanya ada di json.data)
         const data = json.data || json;
 
-        if (!data || !data.chapter_list) { // Sesuaikan field API kamu
-             // Coba cek field lain kalau struktur beda
-             if(!data.chapters) return null;
+        // Cek variasi field (chapters/chapter_list)
+        if (!data || (!data.chapter_list && !data.chapters)) { 
+             return null;
         }
 
-        // Pastikan field mappingnya benar sesuai output API kamu
         return {
             title: data.title,
             cover: data.thumbnail || data.cover, 
             synopsis: data.synopsis,
-            // API kamu mungkin mengembalikan 'chapter_list' atau 'chapters'
             chapters: (data.chapter_list || data.chapters || []).map(ch => ({
                 title: ch.title || ch.name,
-                id: ch.id || ch.endpoint, // Penting: Endpoint buat baca nanti
+                id: ch.id || ch.endpoint, 
                 date: ch.date || ch.uploaded_on
             }))
         };
