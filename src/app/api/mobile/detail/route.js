@@ -6,66 +6,79 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
     const { searchParams } = new URL(request.url);
-    const id = searchParams.get('id'); 
-    let source = searchParams.get('source'); // Kita pakai 'let' biar bisa diubah
-
-    if (!id) return NextResponse.json({ status: false, message: "ID Missing" }, { status: 400 });
-
-    // 🔥 FIX DARURAT: DETEKSI OTOMATIS 🔥
-    // Walaupun HP ngirim 'manhwa', 'manhua', atau null, kita paksa cek ID-nya.
-    // ID Shinigami biasanya panjang atau ada format tertentu, tapi cara paling aman:
-    // Jika source adalah 'manhwa' atau 'manhua', ITU PASTI SHINIGAMI.
-    if (source) {
-        const s = source.toLowerCase();
-        if (s.includes('manhwa') || s.includes('manhua') || s.includes('shinigami')) {
-            source = 'shinigami';
-        }
+    const rawId = searchParams.get('id'); 
+    
+    // 1. VALIDASI AWAL
+    if (!rawId) {
+        return NextResponse.json({ status: false, message: "ID Kosong" }, { status: 200 });
     }
 
-    // 🔥 FIX DARURAT 2: DETEKSI DARI ID (Jaga-jaga source kosong)
-    // ID KomikIndo biasanya bersih (misal: 'one-piece'), Shinigami kadang aneh.
-    // Tapi mari kita fokus ke source dulu.
-
     try {
-        let data = null;
+        // 2. AUTO-CLEAN ID (PEMBERSIH OTOMATIS)
+        // Mengubah "https://domain.com/komik/judul-komik/" menjadi "judul-komik"
+        let cleanId = rawId;
+        if (cleanId.startsWith('http')) {
+            // Ambil bagian paling belakang dari URL
+            const parts = cleanId.replace(/\/$/, '').split('/'); // Hapus slash akhir lalu split
+            cleanId = parts[parts.length - 1]; // Ambil yang terakhir
+        }
+        // Hapus prefix 'manga-' jika ada (khas Shinigami)
+        cleanId = cleanId.replace(/^manga-/, '');
 
-        console.log(`🔍 DEBUG: ID=${id} | Original Source=${searchParams.get('source')} | Final Source=${source}`);
+        console.log(`🔍 [Universal Search] Raw: ${rawId} -> Clean: ${cleanId}`);
 
-        if (source === 'shinigami') {
-            data = await getShinigamiDetail(id);
-        } else {
-            // Default ke KomikIndo
-            data = await getKomikindoDetail(id);
-            
-            // 🔥 FIX DARURAT 3: KESEMPATAN KEDUA
-            // Kalau dicari di KomikIndo GAGAL (null), coba cari di Shinigami!
-            // Siapa tau HP ngirim source kosong tapi ternyata itu komik Shinigami.
-            if (!data) {
-                console.log("⚠️ Gagal di KomikIndo, mencoba cari di Shinigami...");
-                data = await getShinigamiDetail(id);
-            }
+        // 3. UNIVERSAL SEARCH (CARI DI KEDUANYA SEKALIGUS)
+        // Kita balapan, siapa yang ketemu duluan dia yang menang.
+        const [shinigamiData, komikindoData] = await Promise.all([
+            getShinigamiDetail(cleanId),
+            getKomikindoDetail(cleanId)
+        ]);
+
+        // 4. PILIH PEMENANG
+        let finalData = null;
+        let finalSource = "";
+
+        if (shinigamiData) {
+            finalData = shinigamiData;
+            finalSource = "Shinigami";
+        } else if (komikindoData) {
+            finalData = komikindoData;
+            finalSource = "KomikIndo";
         }
 
-        if (!data) {
-            return NextResponse.json({ status: false, message: "Data tidak ditemukan di kedua source" }, { status: 404 });
+        // 5. HASIL AKHIR
+        if (!finalData) {
+            console.log("❌ Data tidak ditemukan di manapun.");
+            // Return 200 OK (Status False) agar HP TIDAK CRASH (DioException)
+            return NextResponse.json({ 
+                status: false, 
+                message: "Komik tidak ditemukan di server manapun." 
+            }, { status: 200 });
         }
 
-        return NextResponse.json({ status: true, data: data });
+        console.log(`✅ Data ditemukan di: ${finalSource}`);
+        return NextResponse.json({ status: true, data: finalData }, { status: 200 });
 
     } catch (error) {
-        console.error("🔥 API Error:", error);
+        console.error("🔥 API Fatal Error:", error);
         return NextResponse.json({ status: false, message: error.message }, { status: 200 });
     }
 }
 
-// --- LOGIKA SHINIGAMI (API) ---
+// --- LOGIKA SHINIGAMI ---
 async function getShinigamiDetail(id) {
     try {
-        const cleanId = id.replace('manga-', '').replace(/\/$/, '');
-        const targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${cleanId}`;
+        // Coba ID mentah
+        let targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}`;
+        let res = await fetchSmart(targetUrl);
         
-        const res = await fetchSmart(targetUrl);
-        if (!res.ok) return null; // Jangan throw error, return null biar bisa lanjut logika
+        // Kalau gagal, coba tambah 'manga-' (kadang API butuh ini)
+        if (!res.ok) {
+            targetUrl = `https://api.sansekai.my.id/api/komik/detail?manga_id=manga-${id}`;
+            res = await fetchSmart(targetUrl);
+        }
+
+        if (!res.ok) return null;
 
         const json = await res.json();
         if (!json.data || !json.data.chapters) return null;
@@ -81,30 +94,23 @@ async function getShinigamiDetail(id) {
             }))
         };
     } catch (e) {
-        console.log(`Shinigami Fail: ${e.message}`);
         return null;
     }
 }
 
-// --- LOGIKA KOMIKINDO (SCRAPING) ---
+// --- LOGIKA KOMIKINDO ---
 async function getKomikindoDetail(id) {
     try {
-        let cleanId = id;
-        if (cleanId.startsWith('http')) {
-             const parts = cleanId.split('/');
-             cleanId = parts[parts.length - 2] || parts[parts.length - 1];
-        }
-        
-        const targetUrl = `https://komikindo.tv/komik/${cleanId}/`;
+        const targetUrl = `https://komikindo.tv/komik/${id}/`;
         const res = await fetchSmart(targetUrl);
         
-        if (!res.ok) return null; // Return null kalau gagal
+        if (!res.ok) return null;
 
         const html = await res.text();
         const $ = cheerio.load(html);
 
         const title = $('h1.entry-title').text().replace("Komik ", "").trim();
-        if (!title) return null; // Kalau title kosong berarti gagal parsing
+        if (!title) return null;
 
         const cover = $('.thumb img').attr('src');
         const synopsis = $('.entry-content.entry-content-single').text().trim();
@@ -125,15 +131,16 @@ async function getKomikindoDetail(id) {
             }
         });
 
+        if (chapters.length === 0) return null;
+
         return { title, cover, synopsis, chapters };
 
     } catch (e) {
-        console.log(`KomikIndo Fail: ${e.message}`);
         return null;
     }
 }
 
-// --- FETCH SMART ---
+// --- FETCH SMART (TANK) ---
 async function fetchSmart(url) {
     const headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
@@ -157,5 +164,5 @@ async function fetchSmart(url) {
         if (res.ok) return res;
     } catch (e) {}
 
-    return { ok: false }; // Return fake response object if all fail
+    return { ok: false };
 }
