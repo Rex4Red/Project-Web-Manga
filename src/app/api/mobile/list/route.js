@@ -15,50 +15,64 @@ export async function GET(request) {
         const section = searchParams.get('section'); 
         const type = searchParams.get('type');        
 
+        const NO_CACHE = 0; 
+
         // --- 1. MODE SEARCH ---
         if (query) {
             const [shinigami, komikindo] = await Promise.allSettled([
-                // 🔥 PAKAI PROXY AGAR LIST TIDAK KOSONG 🔥
-                fetchProxy(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
-                fetchProxy(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
+                fetchNoCache(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
+                fetchNoCache(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
             ]);
 
-            if (shinigami.status === 'fulfilled' && shinigami.value) {
-                data = [...data, ...mapShinigami(shinigami.value)];
+            if (shinigami.status === 'fulfilled') {
+                const items = extractData(shinigami.value);
+                if (items.length > 0) data = [...data, ...mapShinigami(items)];
             }
-            if (komikindo.status === 'fulfilled' && komikindo.value) {
-                data = [...data, ...mapKomikIndo(komikindo.value)];
+            if (komikindo.status === 'fulfilled') {
+                const items = extractData(komikindo.value);
+                if (items.length > 0) data = [...data, ...mapKomikIndo(items)];
             }
         } 
         // --- 2. MODE HOME ---
         else {
             if (source === 'komikindo') {
                 let res = {};
-                if (section === 'popular') res = await fetchProxy(`${KOMIKINDO_API}/komik/popular`);
-                else res = await fetchProxy(`${KOMIKINDO_API}/komik/latest`);
-                
-                if (res) data = mapKomikIndo(res);
+                if (section === 'popular') {
+                    res = await fetchNoCache(`${KOMIKINDO_API}/komik/popular`);
+                } else {
+                    res = await fetchNoCache(`${KOMIKINDO_API}/komik/latest`);
+                }
+                const items = extractData(res);
+                if (items.length > 0) data = mapKomikIndo(items);
             } 
             else {
-                // SHINIGAMI LEWAT PROXY
+                // SHINIGAMI (Project / Mirror)
                 let res = {};
                 const selectedType = type || 'project'; 
                 
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
-                    res = await fetchProxy(`${SHINIGAMI_API}/komik/recommended?type=${recType}`);
-                    if (!res) res = await fetchProxy(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`);
+                    res = await fetchNoCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`);
+                    if (isDataEmpty(res)) res = await fetchNoCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`);
                 } else {
-                    res = await fetchProxy(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`);
-                    if (!res) res = await fetchProxy(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`);
+                    // Endpoint Latest support ?type=mirror atau ?type=project
+                    res = await fetchNoCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`);
+                    
+                    // Fallback kalau kosong
+                    if (isDataEmpty(res)) {
+                        res = await fetchNoCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`);
+                    }
                 }
 
-                if (res) data = mapShinigami(res);
+                const items = extractData(res);
+                if (items.length > 0) data = mapShinigami(items);
             }
         }
 
         return NextResponse.json({ status: true, total: data.length, data }, {
-            headers: { 'Cache-Control': 'no-store, max-age=0' }
+            headers: {
+                'Cache-Control': 'no-store, max-age=0',
+            }
         });
 
     } catch (error) {
@@ -66,48 +80,86 @@ export async function GET(request) {
     }
 }
 
-// --- FUNGSI FETCH LEWAT PROXY ---
-async function fetchProxy(url) {
-    try {
-        // Coba Direct dulu
-        let res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, next: { revalidate: 0 } });
-        if (res.ok) return extractData(await res.json());
+// --- HELPER FUNCTIONS ---
 
-        // Kalau gagal, LEWAT PROXY
-        const proxyUrl = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
-        res = await fetch(proxyUrl, { next: { revalidate: 0 } });
-        if (res.ok) return extractData(await res.json());
-        
+async function fetchNoCache(url) {
+    try {
+        const res = await fetch(url, { 
+            headers: { "User-Agent": "Mozilla/5.0" },
+            next: { revalidate: 0 } 
+        });
+        if (res.ok) {
+            const json = await res.json();
+            if (isDataEmpty(json)) return null; 
+            return json;
+        }
         return null;
     } catch (e) { return null; }
 }
 
-function extractData(json) {
-    if (!json) return [];
-    if (Array.isArray(json)) return json;
-    if (json.data && Array.isArray(json.data)) return json.data;
-    if (json.data?.data && Array.isArray(json.data.data)) return json.data.data;
+function isDataEmpty(res) {
+    if (!res) return true;
+    if (res.data && Array.isArray(res.data) && res.data.length > 0) return false;
+    if (res.data?.data && Array.isArray(res.data.data) && res.data.data.length > 0) return false;
+    if (Array.isArray(res) && res.length > 0) return false;
+    return true;
+}
+
+function extractData(res) {
+    if (!res) return [];
+    if (Array.isArray(res)) return res;
+    if (res.data && Array.isArray(res.data)) return res.data;
+    if (res.data?.data && Array.isArray(res.data.data)) return res.data.data;
     return [];
 }
 
-// 🔥 KEMBALIKAN UUID (SESUAI PERMINTAAN) 🔥
+// 🔥 FUNGSI MAPPER SHINIGAMI (IMAGE HUNTER) 🔥
 function mapShinigami(list) {
     return list.map(item => {
-        // Kita ambil manga_id (UUID)
-        let finalId = item.manga_id || item.link || item.slug || "";
+        // 1. CARI GAMBAR DI SEMUA LUBANG TIKUS
+        const possibleImages = [
+            item.thumbnail, 
+            item.cover_image_url, 
+            item.cover_url,
+            item.image, 
+            item.img,
+            item.cover, 
+            item.thumb,
+            item.poster,
+            item.featured_image
+        ];
         
-        // Bersihkan kalau dia berupa link
-        if (finalId.includes('http')) {
-             const parts = finalId.replace(/\/$/, '').split('/');
-             finalId = parts[parts.length - 1];
+        // Ambil yang pertama ketemu & panjangnya valid
+        let finalImage = possibleImages.find(img => img && typeof img === 'string' && img.length > 10) || "";
+
+        // 2. PARSING ID (Safe Mode)
+        let rawLink = item.slug || item.link || item.endpoint || item.href || "";
+        let finalId = "";
+
+        if (rawLink && rawLink.includes('/')) {
+            rawLink = rawLink.replace(/\/$/, '');
+            finalId = rawLink.split('/').last || rawLink.split('/').pop();
+        } else if (item.manga_id) {
+            finalId = item.manga_id;
+        } else {
+            finalId = rawLink;
         }
+        
+        // Bersihkan ID
+        if (finalId) finalId = finalId.replace(/^manga-/, '');
+
+        // 3. CHAPTER
+        const possibleChapters = [item.latest_chapter_text, item.latest_chapter_number, item.latest_chapter, item.chapter, item.lastChapter, item.chap];
+        let finalChapter = "Ch. ?";
+        const found = possibleChapters.find(ch => ch && ch.toString().trim().length > 0);
+        if (found) finalChapter = found.toString();
 
         return {
-            id: finalId, // INI AKAN BERISI UUID
+            id: finalId, 
             title: item.title,
-            image: item.cover_portrait_url || item.thumbnail || item.image || "",
-            chapter: item.latest_chapter_text || "Ch. ?",
-            score: item.score || "N/A", 
+            image: finalImage, // Gambar yang sudah dicari susah payah
+            chapter: finalChapter,
+            score: item.score || item.user_rate || "N/A", 
             type: 'shinigami'
         };
     });
@@ -115,14 +167,22 @@ function mapShinigami(list) {
 
 function mapKomikIndo(list) {
     return list.map(item => {
-        let id = item.endpoint || item.id || item.link || "";
-        id = id.replace('komikindo.ch', '').replace('/komik/', '').replace(/\/$/, '');
+        let rawId = item.endpoint || item.id || item.link || "";
+        if (rawId.startsWith("http")) {
+             rawId = rawId.replace('komikindo.ch', '').replace('/komik/', '').replace(/\/$/, '');
+             const parts = rawId.split('/');
+             rawId = parts[parts.length - 1];
+        }
+        
+        let img = item.thumb || item.image || item.thumbnail || "";
+        if (img && img.includes('?')) img = img.split('?')[0];
+
         return {
-            id: id,
+            id: rawId,
             title: item.title,
-            image: item.thumb || item.image || "",
-            chapter: item.chapter || "Ch. ?",
-            score: item.score || "N/A", 
+            image: img,
+            chapter: item.chapter || item.latest_chapter || "Ch. ?",
+            score: item.score || item.rating || "N/A", 
             type: 'komikindo'
         };
     });
