@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
-export const maxDuration = 60; 
+// 🔥 MATIKAN CACHE SECARA GLOBAL 🔥
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const fetchCache = 'force-no-store';
 
 const SHINIGAMI_API = "https://api.sansekai.my.id/api";
 const KOMIKINDO_API = "https://rex4red-komik-api-scrape.hf.space";
@@ -15,14 +17,11 @@ export async function GET(request) {
         const section = searchParams.get('section'); 
         const type = searchParams.get('type');        
 
-        // 🔥 WAJIB: MATIKAN CACHE AGAR DATA TERBARU MUNCUL 🔥
-        const NO_CACHE = 0; 
-
         // --- 1. MODE SEARCH ---
         if (query) {
             const [shinigami, komikindo] = await Promise.allSettled([
-                fetchWithCache(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`, NO_CACHE),
-                fetchWithCache(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`, NO_CACHE)
+                fetchNoCache(`${SHINIGAMI_API}/komik/search?query=${encodeURIComponent(query)}`),
+                fetchNoCache(`${KOMIKINDO_API}/komik/search?q=${encodeURIComponent(query)}`)
             ]);
 
             if (shinigami.status === 'fulfilled') {
@@ -38,28 +37,29 @@ export async function GET(request) {
         else {
             if (source === 'komikindo') {
                 let res = {};
+                // KomikIndo tetap pakai no-cache biar aman
                 if (section === 'popular') {
-                    res = await fetchWithCache(`${KOMIKINDO_API}/komik/popular`, 60);
+                    res = await fetchNoCache(`${KOMIKINDO_API}/komik/popular`);
                 } else {
-                    res = await fetchWithCache(`${KOMIKINDO_API}/komik/latest`, 60);
+                    res = await fetchNoCache(`${KOMIKINDO_API}/komik/latest`);
                 }
                 const items = extractData(res);
                 if (items.length > 0) data = mapKomikIndo(items);
             } 
             else {
-                // SHINIGAMI NO CACHE UNTUK FIX ID
+                // SHINIGAMI (SUMBER MASALAH) KITA PAKSA NO CACHE
                 let res = {};
                 const selectedType = type || 'project'; 
                 
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
-                    res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, NO_CACHE);
-                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`, NO_CACHE);
-                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`, NO_CACHE);
+                    res = await fetchNoCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`);
+                    if (isDataEmpty(res)) res = await fetchNoCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`);
+                    if (isDataEmpty(res)) res = await fetchNoCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`);
                 } else {
-                    res = await fetchWithCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`, NO_CACHE);
-                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`, NO_CACHE);
-                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/popular`, NO_CACHE);
+                    res = await fetchNoCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`);
+                    if (isDataEmpty(res)) res = await fetchNoCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`);
+                    if (isDataEmpty(res)) res = await fetchNoCache(`${SHINIGAMI_API}/komik/popular`);
                 }
 
                 const items = extractData(res);
@@ -67,12 +67,13 @@ export async function GET(request) {
             }
         }
 
-        // Header Anti-Cache untuk Browser/HP
+        // Header Anti-Cache Ekstrim untuk Browser/HP
         return NextResponse.json({ status: true, total: data.length, data }, {
             headers: {
-                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+                'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
                 'Pragma': 'no-cache',
                 'Expires': '0',
+                'Surrogate-Control': 'no-store'
             }
         });
 
@@ -82,6 +83,33 @@ export async function GET(request) {
 }
 
 // --- HELPER FUNCTIONS ---
+
+// 🔥 FUNGSI FETCH KHUSUS TANPA CACHE 🔥
+async function fetchNoCache(url) {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); 
+        
+        const res = await fetch(url, { 
+            signal: controller.signal,
+            cache: 'no-store', // INI KUNCINYA: JANGAN SIMPAN APAPUN
+            headers: { 
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache"
+            }
+        });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+            const json = await res.json();
+            if (isDataEmpty(json)) return null; 
+            return json;
+        }
+        return null;
+    } catch (e) { return null; }
+}
+
 function isDataEmpty(res) {
     if (!res) return true;
     if (res.data && Array.isArray(res.data) && res.data.length > 0) return false;
@@ -98,54 +126,37 @@ function extractData(res) {
     return [];
 }
 
-async function fetchWithCache(url, revalidateSeconds) {
-    const cacheOption = revalidateSeconds === 0 ? 'no-store' : 'force-cache';
-    const nextOption = revalidateSeconds === 0 ? undefined : { revalidate: revalidateSeconds };
-
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000); 
-        
-        const res = await fetch(url, { 
-            signal: controller.signal,
-            cache: cacheOption, 
-            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36" }, 
-            next: nextOption 
-        });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-            const json = await res.json();
-            if (isDataEmpty(json)) return null; 
-            return json;
-        }
-        return null;
-    } catch (e) { return null; }
-}
-
-// 🔥 FUNGSI LAUNDRY ID (Prioritas Link/Slug) 🔥
+// 🔥 FUNGSI PARSING ID YANG LEBIH CERDAS 🔥
 function mapShinigami(list) {
     return list.map(item => {
-        // 1. CARI SLUG DARI LINK DULUAN!
-        // Karena Detail API butuh slug buat scraping (shinigami.id/series/SLUG)
-        let rawId = item.slug || item.link || item.endpoint || item.href || "";
-        
-        // 2. Bersihkan link jadi slug murni
-        if (rawId && rawId.startsWith("http")) {
-            rawId = rawId.replace(/\/$/, '');
-            const parts = rawId.split('/');
-            rawId = parts[parts.length - 1]; // Ambil bagian paling belakang
+        // 1. KITA CARI URL ASLINYA (LINK)
+        // Shinigami biasanya punya field 'link' atau 'href' yang berisi URL lengkap
+        let rawLink = item.link || item.href || item.endpoint || "";
+        let finalId = "";
+
+        // 2. KITA EKSTRAK SLUG DARI URL TERSEBUT
+        if (rawLink && rawLink.includes('/')) {
+            // Hapus trailing slash
+            rawLink = rawLink.replace(/\/$/, '');
+            // Ambil bagian paling belakang
+            const parts = rawLink.split('/');
+            finalId = parts[parts.length - 1];
+        } 
+        // 3. JIKA TIDAK ADA LINK, BARU CEK SLUG MURNI
+        else if (item.slug) {
+            finalId = item.slug;
         }
 
-        // 3. Kalau slug kosong, baru terpaksa pakai manga_id (UUID)
-        if (!rawId) {
-             rawId = item.manga_id || "";
+        // 4. JIKA KOSONG JUGA, TERPAKSA PAKAI MANGA_ID (TAPI INI RESIKO TINGGI)
+        if (!finalId) {
+             finalId = item.manga_id || "";
         }
 
-        // 4. Bersihkan 'manga-' kalau ada
-        rawId = rawId.replace(/^manga-/, '');
+        // 5. BERSIHKAN SLUG DARI SAMPAH
+        if (finalId) {
+            finalId = finalId.replace(/^manga-/, ''); // Hapus 'manga-' di depan
+        }
 
-        // Mapping Gambar & Chapter
         const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
         const possibleChapters = [item.latest_chapter_text, item.latest_chapter_number, item.latest_chapter, item.chapter, item.lastChapter, item.chap];
@@ -154,7 +165,7 @@ function mapShinigami(list) {
         if (found) finalChapter = found.toString();
 
         return {
-            id: rawId,
+            id: finalId, // INI HARUSNYA SEKARANG SUDAH SLUG (judul-komik), BUKAN UUID
             title: item.title,
             image: finalImage,
             chapter: finalChapter,
