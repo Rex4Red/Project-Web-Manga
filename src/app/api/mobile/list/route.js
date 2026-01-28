@@ -12,7 +12,6 @@ export async function GET(request) {
         const { searchParams } = new URL(request.url);
         const query = searchParams.get('q');
         const source = searchParams.get('source');
-        
         const section = searchParams.get('section'); 
         const type = searchParams.get('type');        
 
@@ -34,7 +33,6 @@ export async function GET(request) {
         } 
         // --- 2. MODE HOME ---
         else {
-            // === KOMIKINDO ===
             if (source === 'komikindo') {
                 let res = {};
                 if (section === 'popular') {
@@ -45,7 +43,6 @@ export async function GET(request) {
                 const items = extractData(res);
                 if (items.length > 0) data = mapKomikIndo(items);
             } 
-            // === SHINIGAMI ===
             else {
                 let res = {};
                 const selectedType = type || 'project'; 
@@ -53,27 +50,16 @@ export async function GET(request) {
                 if (section === 'recommended') {
                     const recType = type || 'manhwa';
                     res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, 1800);
-                    if (isDataEmpty(res)) {
-                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`, 1800);
-                    }
-                    if (isDataEmpty(res)) {
-                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`, 300);
-                    }
-                } 
-                else {
+                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`, 1800);
+                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=update`, 300);
+                } else {
                     res = await fetchWithCache(`${SHINIGAMI_API}/komik/latest?type=${selectedType}`, 90);
-                    if (isDataEmpty(res)) {
-                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`, 90);
-                    }
-                    if (isDataEmpty(res)) {
-                        res = await fetchWithCache(`${SHINIGAMI_API}/komik/popular`, 300);
-                    }
+                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${selectedType}&order=latest`, 90);
+                    if (isDataEmpty(res)) res = await fetchWithCache(`${SHINIGAMI_API}/komik/popular`, 300);
                 }
 
                 const items = extractData(res);
-                if (items.length > 0) {
-                    data = mapShinigami(items);
-                } 
+                if (items.length > 0) data = mapShinigami(items);
             }
         }
 
@@ -84,7 +70,7 @@ export async function GET(request) {
     }
 }
 
-// --- HELPER FUNCTIONS (ASLI DARI KODE KAMU) ---
+// --- HELPER FUNCTIONS ---
 
 function isDataEmpty(res) {
     if (!res) return true;
@@ -105,16 +91,12 @@ function extractData(res) {
 async function fetchWithCache(url, cacheTime) {
     let res = await tryFetch(url, cacheTime);
     if (!isDataEmpty(res)) return res;
-
-    // console.log("⚠️ Direct fail, trying Proxy 1...");
+    
+    // Fallback Proxy
     const proxy1 = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
     res = await tryFetch(proxy1, 60); 
     if (!isDataEmpty(res)) return res;
 
-    // console.log("⚠️ Proxy 1 fail, trying Proxy 2...");
-    const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-    res = await tryFetch(proxy2, 60);
-    
     return res || {};
 }
 
@@ -122,69 +104,53 @@ async function tryFetch(url, revalidateSeconds) {
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 8000); 
-
         const res = await fetch(url, { 
             signal: controller.signal,
-            headers: { 
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }, 
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36" }, 
             next: { revalidate: revalidateSeconds } 
         });
-        
         clearTimeout(timeoutId);
-        
         if (res.ok) {
             const json = await res.json();
             if (isDataEmpty(json)) return null; 
             return json;
         }
         return null;
-    } catch (e) { 
-        return null; 
-    }
+    } catch (e) { return null; }
 }
 
-// 🔥 INI DIA PERBAIKANNYA (HANYA BAGIAN INI YG SAYA UBAH) 🔥
+// 🔥 FUNGSI LAUNDRY ID (PEMBERSIH SUPER) 🔥
+function cleanID(rawId) {
+    if (!rawId) return "";
+    let id = rawId.toString();
+    
+    // 1. Buang Domain (https://...)
+    if (id.startsWith("http")) {
+        id = id.replace(/\/$/, '');
+        const parts = id.split('/');
+        id = parts[parts.length - 1];
+    }
+    
+    // 2. Buang Prefix 'manga-' yang suka bikin error
+    id = id.replace(/^manga-/, '');
+    
+    return id;
+}
+
 function mapShinigami(list) {
     return list.map(item => {
-        const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
-        const finalImage = possibleImages.find(img => img && img.length > 10) || "";
-
-        const possibleChapters = [item.latest_chapter_text, item.latest_chapter_number, item.latest_chapter, item.chapter, item.lastChapter, item.chap];
-        let finalChapter = "Ch. ?";
+        // Ambil ID dari field manapun yang tersedia, PRIORITASKAN LINK/SLUG
+        // JANGAN ambil manga_id dulu karena isinya UUID!
+        let rawId = item.slug || item.link || item.href || item.endpoint || "";
         
-        const found = possibleChapters.find(ch => ch && ch.toString().trim().length > 0);
-        if (found) {
-             finalChapter = found.toString();
-             if (!isNaN(parseFloat(finalChapter)) && !finalChapter.toLowerCase().includes('ch')) {
-                 finalChapter = "Ch. " + finalChapter;
-             }
-        }
-        if (finalChapter.toLowerCase().includes("chapter")) finalChapter = finalChapter.replace(/chapter/gi, "Ch.").trim();
-
-        // --- BAGIAN KRUSIAL: PEMBERSIHAN ID ---
-        // 1. Ambil slug/link/endpoint DULUAN (Jangan manga_id duluan karena isinya UUID)
-        let id = item.slug || item.link || item.endpoint || item.href || item.manga_id || "";
-        
-        // 2. Kalau ID masih terlihat seperti UUID (panjang & ada strip), paksa cari dari Link
-        if (id.length > 20 && id.includes('-') && !id.includes('manga-') && item.link) {
-            id = item.link;
-        }
-
-        // 3. Bersihkan sisa-sisa URL
-        id = id.replace('https://shinigami.id/series/', '')
-               .replace('https://shinigami.id/', '')
-               .replace(/\/$/, ''); // Hapus slash belakang
-        
-        // 4. Bersihkan 'manga-' di depan
-        id = id.replace(/^manga-/, '');
-        // --------------------------------------
+        // Kalau semua kosong, baru terpaksa ambil manga_id
+        if (!rawId) rawId = item.manga_id || "";
 
         return {
-            id: id,
+            id: cleanID(rawId), // BERSIHKAN DI SINI
             title: item.title,
-            image: finalImage,
-            chapter: finalChapter,
+            image: item.cover_portrait_url || item.thumbnail || item.image || "",
+            chapter: item.latest_chapter_text || "Ch. ?",
             score: item.score || item.user_rate || "N/A", 
             type: 'shinigami'
         };
@@ -193,19 +159,14 @@ function mapShinigami(list) {
 
 function mapKomikIndo(list) {
     return list.map(item => {
-        let img = item.thumb || item.image || item.thumbnail || "";
-        if (img && img.includes('?')) img = img.split('?')[0];
-
-        // Pembersihan ID KomikIndo
-        let id = item.endpoint || item.id || item.link || "";
-        id = id.replace('https://komikindo.ch/', '')
-               .replace('/komik/', '')
-               .replace(/\/$/, '');
+        const rawId = item.endpoint || item.id || item.link || "";
+        let clean = cleanID(rawId);
+        clean = clean.replace('komikindo.ch', '').replace('/komik/', '').replace(/\/$/, '');
 
         return {
-            id: id,
+            id: clean,
             title: item.title,
-            image: img,
+            image: item.thumb || item.image || "",
             chapter: item.chapter || item.latest_chapter || "Ch. ?",
             score: item.score || item.rating || "N/A", 
             type: 'komikindo'
