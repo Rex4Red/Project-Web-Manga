@@ -11,97 +11,84 @@ export async function GET(request) {
     
     if (!rawId) return NextResponse.json({ status: false, message: "ID Kosong" });
 
-    // Bersihkan ID dari prefix 'manga-' jika ada
+    // Bersihkan ID
     let cleanId = rawId.replace(/^manga-/, '');
-    
-    // Jika ID berbentuk URL full, ambil bagian akhirnya saja
     if (cleanId.includes('http')) {
         const parts = cleanId.replace(/\/$/, '').split('/');
         cleanId = parts[parts.length - 1];
     }
 
     try {
-        // Coba ambil data secara PARALEL (Shinigami & KomikIndo)
-        const [shinigami, komikindo] = await Promise.all([
-            fetchShinigamiUltimate(cleanId),
-            fetchKomikindo(cleanId)
-        ]);
+        // Coba ambil data secara PARALEL
+        // Kita prioritaskan KomikIndo dulu kalau source-nya KomikIndo
+        const source = searchParams.get('source');
+        
+        let finalData = null;
+        let finalSource = "";
 
-        // Prioritaskan Shinigami, kalau gagal baru KomikIndo
-        let finalData = shinigami || komikindo;
-        let source = shinigami ? "Shinigami" : (komikindo ? "KomikIndo" : "");
+        if (source === 'komikindo') {
+             finalData = await fetchKomikindo(cleanId);
+             finalSource = "KomikIndo";
+        } else {
+             // Default ke Shinigami (Hybrid Proxy)
+             finalData = await fetchShinigamiUltimate(cleanId);
+             finalSource = "Shinigami";
+             
+             // Fallback ke KomikIndo kalau Shinigami gagal
+             if (!finalData) {
+                 finalData = await fetchKomikindo(cleanId);
+                 finalSource = "KomikIndo";
+             }
+        }
 
         if (!finalData) {
             return NextResponse.json({ 
                 status: false, 
-                message: "Gagal menembus blokir server (Semua jalur dicoba)." 
+                message: "Gagal mengambil data dari sumber." 
             });
         }
         
-        return NextResponse.json({ status: true, data: finalData, source });
+        return NextResponse.json({ status: true, data: finalData, source: finalSource });
 
     } catch (error) {
         return NextResponse.json({ status: false, message: error.message });
     }
 }
 
-// 🔥 FUNGSI ULTIMATE: ROTASI 4 JALUR PROXY 🔥
+// --- FUNGSI PROXY SHINIGAMI (JAGA-JAGA BUAT SERVER) ---
 async function fetchShinigamiUltimate(id) {
     const time = Date.now();
-    
-    // Kita siapkan 2 versi URL: Versi ID dan Versi Slug (Jaga-jaga)
     const targetUrls = [
         `https://api.sansekai.my.id/api/komik/detail?manga_id=${id}&t=${time}`,
-        `https://api.sansekai.my.id/api/komik/detail?manga_id=manga-${id}&t=${time}`,
-        // Coba tebak slug jika ID gagal (Fallback)
-        `https://api.sansekai.my.id/api/komik/detail?slug=${id}&t=${time}`
+        `https://api.sansekai.my.id/api/komik/detail?manga_id=manga-${id}&t=${time}`
     ];
-
-    // DAFTAR JALUR TIKUS (PROXIES)
     const proxies = [
-        (url) => url, // 1. Coba Langsung (Siapa tau beruntung)
-        (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`, // 2. AllOrigins
-        (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`, // 3. CorsProxy
-        (url) => `https://images.weserv.nl/?url=${encodeURIComponent(url)}&output=json` // 4. Weserv (Hack JSON)
+        (url) => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+        (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`
     ];
 
-    // PERULANGAN BRUTAL: Coba setiap URL lewat setiap PROXY
     for (const target of targetUrls) {
         for (const wrapWithProxy of proxies) {
-            const finalUrl = wrapWithProxy(target);
             try {
-                const res = await fetch(finalUrl, { 
-                    headers: { 
-                        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36" 
-                    },
-                    next: { revalidate: 0 } 
-                });
-
+                const res = await fetch(wrapWithProxy(target), { next: { revalidate: 0 } });
                 if (res.ok) {
-                    const text = await res.text();
-                    try {
-                        const json = JSON.parse(text);
-                        // Cek apakah data valid (ada chapter)
-                        const data = json.data || json; 
-                        if (data && data.chapters) {
-                            return mapShinigamiDetail(data);
-                        }
-                    } catch (err) { /* JSON Parse error, lanjut next proxy */ }
+                    const json = await res.json();
+                    const data = json.data || json;
+                    if (data && (data.chapters || data.chapter_list)) return mapShinigamiDetail(data);
                 }
-            } catch (e) {
-                // Proxy ini gagal, lanjut ke proxy berikutnya
-                continue;
-            }
+            } catch (e) { continue; }
         }
     }
-    return null; // Nyerah kalau semua gagal
+    return null;
 }
 
 function mapShinigamiDetail(data) {
     return {
         title: data.title,
         cover: data.thumbnail || data.cover_image_url,
-        synopsis: data.synopsis,
+        synopsis: data.synopsis || data.description,
+        author: data.author || "Unknown",
+        status: data.status === 1 ? "Ongoing" : "Completed",
         chapters: (data.chapters || []).map(ch => ({
             title: `Chapter ${ch.chapter_number}`,
             id: ch.href || ch.link, 
@@ -110,26 +97,39 @@ function mapShinigamiDetail(data) {
     };
 }
 
-// Fungsi KomikIndo (Cadangan)
+// 🔥 FUNGSI KOMIKINDO YANG SUDAH DIPERBAIKI 🔥
 async function fetchKomikindo(id) {
     try {
         const url = `${KOMIKINDO_BASE}/komik/detail/${id}`;
-        const res = await fetch(url, { next: { revalidate: 0 } });
+        // Header Chrome agar tidak dianggap bot
+        const res = await fetch(url, { 
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" },
+            next: { revalidate: 0 } 
+        });
+        
         if (!res.ok) return null;
         
         const json = await res.json();
         const data = json.data || json;
         if (!data.title) return null;
 
+        // 🔥 PERBAIKAN UTAMA DI SINI 🔥
+        // Kita cek 'chapters' DULUAN, baru 'chapter_list'
+        let rawChapters = data.chapters || data.chapter_list || [];
+
         return {
             title: data.title,
-            cover: data.thumb || data.image,
+            cover: data.thumb || data.image || data.cover,
             synopsis: data.synopsis,
-            chapters: (data.chapter_list || []).map(ch => ({
-                title: ch.name || ch.title,
+            author: data.author || data.pengarang || "Unknown",
+            status: data.status || "Unknown",
+            // Mapping Chapter
+            chapters: rawChapters.map(ch => ({
+                title: ch.title || ch.name,
+                // Bersihkan ID/Endpoint
                 id: (ch.endpoint || ch.id).replace('https://komikindo.ch/', '').replace('/komik/', '').replace(/\/$/, ''),
-                date: ch.date
-            })).filter(c => c.id)
+                date: ch.time || ch.date || ""
+            }))
         };
     } catch (e) { return null; }
 }
