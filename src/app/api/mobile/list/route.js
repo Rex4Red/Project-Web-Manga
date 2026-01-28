@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 export const maxDuration = 60; 
+export const dynamic = 'force-dynamic'; // Pastikan dynamic agar tidak di-cache statis oleh Vercel/Next
 
 const SHINIGAMI_API = "https://api.sansekai.my.id/api";
 const KOMIKINDO_API = "https://rex4red-komik-api-scrape.hf.space";
@@ -13,7 +14,7 @@ export async function GET(request) {
         const source = searchParams.get('source');
         
         const section = searchParams.get('section'); 
-        const type = searchParams.get('type');       
+        const type = searchParams.get('type');        
 
         // --- 1. MODE SEARCH ---
         if (query) {
@@ -33,15 +34,13 @@ export async function GET(request) {
         } 
         // --- 2. MODE HOME ---
         else {
-            // === KOMIKINDO (UPDATED) ===
+            // === KOMIKINDO ===
             if (source === 'komikindo') {
                 let res = {};
                 
                 if (section === 'popular') {
-                    // Endpoint Popular (Cache 30 menit)
                     res = await fetchWithCache(`${KOMIKINDO_API}/komik/popular`, 1800);
                 } else {
-                    // Endpoint Latest (Default) (Cache 5 menit)
                     res = await fetchWithCache(`${KOMIKINDO_API}/komik/latest`, 300);
                 }
 
@@ -57,7 +56,6 @@ export async function GET(request) {
                     const recType = type || 'manhwa';
                     res = await fetchWithCache(`${SHINIGAMI_API}/komik/recommended?type=${recType}`, 1800);
                     
-                    // Fallback ke Popular List yang TERFILTER tipe
                     if (isDataEmpty(res)) {
                         res = await fetchWithCache(`${SHINIGAMI_API}/komik/list?type=${recType}&order=popular`, 1800);
                     }
@@ -89,8 +87,7 @@ export async function GET(request) {
     }
 }
 
-// ... (Copy Paste Helper functions: isDataEmpty, extractData, fetchWithCache, tryFetch dari kode sebelumnya) ...
-// ... (Helper functions SAMA PERSIS, tidak berubah, pastikan tetap ada di file) ...
+// --- HELPER FUNCTIONS ---
 
 function isDataEmpty(res) {
     if (!res) return true;
@@ -112,12 +109,12 @@ async function fetchWithCache(url, cacheTime) {
     let res = await tryFetch(url, cacheTime);
     if (!isDataEmpty(res)) return res;
 
-    console.log("⚠️ Direct fail, trying Proxy 1...");
+    // console.log("⚠️ Direct fail, trying Proxy 1...");
     const proxy1 = `https://corsproxy.io/?url=${encodeURIComponent(url)}`;
     res = await tryFetch(proxy1, 60); 
     if (!isDataEmpty(res)) return res;
 
-    console.log("⚠️ Proxy 1 fail, trying Proxy 2...");
+    // console.log("⚠️ Proxy 1 fail, trying Proxy 2...");
     const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
     res = await tryFetch(proxy2, 60);
     
@@ -127,7 +124,7 @@ async function fetchWithCache(url, cacheTime) {
 async function tryFetch(url, revalidateSeconds) {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000); 
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // Naikkan timeout dikit
 
         const res = await fetch(url, { 
             signal: controller.signal,
@@ -150,14 +147,16 @@ async function tryFetch(url, revalidateSeconds) {
     }
 }
 
+// 🔥 FIX MAPPER SHINIGAMI (PEMBERSIH ID) 🔥
 function mapShinigami(list) {
     return list.map(item => {
+        // 1. Gambar
         const possibleImages = [item.cover_portrait_url, item.cover_image_url, item.thumbnail, item.image, item.thumb, item.cover, item.img];
         const finalImage = possibleImages.find(img => img && img.length > 10) || "";
 
+        // 2. Chapter
         const possibleChapters = [item.latest_chapter_text, item.latest_chapter_number, item.latest_chapter, item.chapter, item.lastChapter, item.chap];
         let finalChapter = "Ch. ?";
-        
         const found = possibleChapters.find(ch => ch && ch.toString().trim().length > 0);
         if (found) {
              finalChapter = found.toString();
@@ -167,8 +166,19 @@ function mapShinigami(list) {
         }
         if (finalChapter.toLowerCase().includes("chapter")) finalChapter = finalChapter.replace(/chapter/gi, "Ch.").trim();
 
+        // 3. ID CLEANING (Bagian Terpenting!)
+        let id = item.manga_id || item.link || item.endpoint || "";
+        
+        // Hapus URL domain kalau API mengirim link full
+        if (id.startsWith("http")) {
+            const parts = id.replace(/\/$/, '').split('/');
+            id = parts[parts.length - 1];
+        }
+        // Hapus prefix 'manga-' yang sering bikin error 404/500
+        id = id.replace(/^manga-/, '');
+
         return {
-            id: item.manga_id || item.link || item.endpoint,
+            id: id,
             title: item.title,
             image: finalImage,
             chapter: finalChapter,
@@ -178,18 +188,24 @@ function mapShinigami(list) {
     });
 }
 
-// 🔥 MAPPER KOMIKINDO UPDATED (Support Popular) 🔥
+// 🔥 FIX MAPPER KOMIKINDO (PEMBERSIH ID) 🔥
 function mapKomikIndo(list) {
     return list.map(item => {
         let img = item.thumb || item.image || item.thumbnail || "";
         if (img && img.includes('?')) img = img.split('?')[0];
 
+        // ID CLEANING
+        let id = item.endpoint || item.id || item.link || "";
+        id = id.replace('https://komikindo.ch/', '')
+               .replace('http://komikindo.ch/', '')
+               .replace('/komik/', '')
+               .replace(/\/$/, ''); // Hapus slash di belakang
+
         return {
-            id: item.endpoint || item.id || item.link,
+            id: id,
             title: item.title,
             image: img,
             chapter: item.chapter || item.latest_chapter || "Ch. ?",
-            // Komikindo Popular pakai field 'rating'
             score: item.score || item.rating || "N/A", 
             type: 'komikindo'
         };
