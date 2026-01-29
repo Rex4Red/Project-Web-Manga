@@ -3,7 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import * as cheerio from 'cheerio';
 import dns from 'node:dns';
 
-// Setup DNS IPv4 (Jaga-jaga)
+// Setup DNS IPv4
 try {
     if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
 } catch (e) {}
@@ -20,7 +20,7 @@ export async function GET(request) {
 
         const supabase = createClient(supabaseUrl, supabaseKey);
 
-        // 1. ANTRIAN
+        // 1. AMBIL ANTRIAN (8 Terlama)
         const { data: queueBatch, error } = await supabase
             .from('bookmarks')
             .select('*')
@@ -34,7 +34,7 @@ export async function GET(request) {
         const userIds = [...new Set(queueBatch.map(b => b.user_id))];
         const { data: settingsData } = await supabase.from('user_settings').select('*').in('user_id', userIds);
 
-        // 3. PROSES
+        // 3. PROSES CEK
         const results = await Promise.all(queueBatch.map(item => checkMangaUpdate(item, supabase, settingsData)));
 
         // 4. UPDATE TIMESTAMP
@@ -124,7 +124,7 @@ async function checkMangaUpdate(item, supabase, allSettings) {
     }
 }
 
-// Fetcher untuk Scraping (Tetap pakai corsproxy karena untuk scraping web dia masih mau)
+// Scraper Fetcher
 async function fetchSmart(url, options = {}, timeoutMs = 8000) {
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(5000) });
@@ -138,7 +138,7 @@ async function fetchSmart(url, options = {}, timeoutMs = 8000) {
     return null;
 }
 
-// Discord (Direct POST biasanya aman)
+// Discord
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
     const res = await fetch(webhookUrl, {
@@ -152,34 +152,42 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
     if (!res.ok) throw new Error(res.statusText);
 }
 
-// 🔥 TELEGRAM (VERSI ALLORIGINS - ANTI BLOKIR 403) 🔥
+// 🔥 TELEGRAM ROTATION (CodeTabs -> ThingProxy -> Direct) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
-    const htmlText = `🚨 <b>${escapeHtml(title)}</b> Update!\n\n${chapter}\n<a href="${cover}">Lihat Cover</a>`;
+    
+    // Pendekkan judul biar URL proxy gak kepanjangan
+    const shortTitle = title.length > 40 ? title.substring(0, 40) + "..." : title;
+    const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
+    
+    // Pesan HTML Simpel
+    const htmlText = `🚨 <b>${escapeHtml(shortTitle)}</b>\n${chapter}\n<a href="${safeCover}">Check Image</a>`;
 
-    // 1. Buat URL Lengkap Telegram (Termasuk pesan)
-    const telegramApiUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${chatId}&text=${encodeURIComponent(htmlText)}&parse_mode=HTML`;
+    // URL Target
+    const tgBase = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${chatId}&text=${encodeURIComponent(htmlText)}&parse_mode=HTML`;
 
-    // 2. Bungkus dengan AllOrigins (Proxy yang lebih longgar)
-    // Tambahkan timestamp agar tidak di-cache oleh proxy
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(telegramApiUrl)}&disableCache=${Date.now()}`;
+    // 1. CODETABS (Biasanya paling sakti buat server-to-server)
+    try {
+        const proxy1 = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(tgBase)}`;
+        const res = await fetch(proxy1, { method: "GET", signal: AbortSignal.timeout(10000) });
+        if (res.ok) return "TG_OK (CodeTabs)";
+    } catch (e) { console.log("CodeTabs fail"); }
 
-    const res = await fetch(proxyUrl, {
-        method: "GET", // AllOrigins minta GET
-        signal: AbortSignal.timeout(15000) // Timeout agak panjang (15s)
-    });
+    // 2. THINGPROXY (Cadangan)
+    try {
+        const proxy2 = `https://thingproxy.freeboard.io/fetch/${tgBase}`;
+        const res = await fetch(proxy2, { method: "GET", signal: AbortSignal.timeout(10000) });
+        if (res.ok) return "TG_OK (ThingProxy)";
+    } catch (e) { console.log("ThingProxy fail"); }
 
-    if (!res.ok) {
-        throw new Error(`AllOrigins Error: ${res.status}`);
+    // 3. DIRECT (Usaha terakhir)
+    try {
+        const res = await fetch(tgBase, { method: "GET", signal: AbortSignal.timeout(5000) });
+        if (res.ok) return "TG_OK (Direct)";
+        throw new Error(`Direct: ${res.status}`);
+    } catch (e) { 
+        throw new Error(`All Proxies Failed: ${e.message}`); 
     }
-
-    // Cek respon JSON dari AllOrigins
-    const json = await res.json();
-    if (json.status?.http_code && json.status.http_code !== 200) {
-         throw new Error(`TG Refused: ${json.status.http_code}`);
-    }
-
-    return "TG_OK (AllOrigins)";
 }
 
 function escapeHtml(text) {
