@@ -59,6 +59,8 @@ export async function GET(request) {
     }
 }
 
+// ... (Bagian atas file GET tetap sama, tidak perlu diubah) ...
+
 async function checkMangaUpdate(item, supabase, allSettings) {
     try {
         let latestChapter = "";
@@ -69,7 +71,6 @@ async function checkMangaUpdate(item, supabase, allSettings) {
 
         // --- 1. SCRAPING (FAST MODE) ---
         if (item.source === 'shinigami') {
-            // Gunakan API, timeout 8 detik saja (Jangan lama-lama)
             const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers }, 8000);
             if (res && res.ok) {
                 try {
@@ -81,11 +82,9 @@ async function checkMangaUpdate(item, supabase, allSettings) {
         } 
         else if (item.source === 'komikindo') {
             let cleanId = item.manga_id.replace(/^\d+-/, '');
-            // Fetch HTML, timeout 10 detik
             const res = await fetchSmart(`https://komikindo.tv/komik/${cleanId}/`, { headers }, 10000);
             if (res && res.ok) {
                 const html = await res.text();
-                // Optimasi Cheerio: Jangan load full body jika chapter ada di atas
                 const $ = cheerio.load(html);
                 let rawText = $('#chapter_list .lchx a').first().text() || $('.chapter-list li:first-child a').text();
                 if (rawText) latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
@@ -99,77 +98,84 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             
             if (isNaN(cleanNew) || cleanNew <= cleanOld) return null; // Tidak ada update
 
-            // Update Chapter Baru di Database
+            // Update Database
             await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
 
-            // Kirim Notifikasi
+            // 🔥 PERBAIKAN: TUNGGU NOTIFIKASI SAMPAI TERKIRIM 🔥
             let notifLog = [];
             const userSetting = allSettings ? allSettings.find(s => s.user_id === item.user_id) : null;
             
             if (userSetting) {
-                // Jalankan notifikasi tanpa await (Fire & Forget) agar cron lebih cepat selesai
+                // Kita tampung semua janji pengiriman (Promises)
+                const notifPromises = [];
+
                 if (userSetting.discord_webhook) {
-                    sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover).then(() => {});
-                    notifLog.push("DC");
+                    notifPromises.push(
+                        sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover)
+                        .then(() => notifLog.push("DC"))
+                        .catch(() => notifLog.push("DC_FAIL"))
+                    );
                 }
+                
                 if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
-                    sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover).then(() => {});
-                    notifLog.push("TG");
+                    notifPromises.push(
+                        sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover)
+                        .then(() => notifLog.push("TG"))
+                        .catch(() => notifLog.push("TG_FAIL"))
+                    );
+                }
+
+                // TUNGGU SEMUA SELESAI (PENTING AGAR TIDAK DI-KILL SERVER)
+                if (notifPromises.length > 0) {
+                    await Promise.all(notifPromises);
                 }
             }
 
-            return `✅ UPDATE [${item.title}]: ${latestChapter}`;
+            return `✅ UPDATE [${item.title}]: ${latestChapter} (${notifLog.join('+')})`;
         }
         return null;
     } catch (e) {
-        return `❌ Err [${item.title}]`;
+        return `❌ Err [${item.title}]: ${e.message}`;
     }
 }
 
 // --- FETCHER PINTAR & CEPAT ---
 async function fetchSmart(url, options = {}, timeoutMs = 8000) {
-    // 1. Coba Direct (Paling Cepat)
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(5000) });
         if (res.ok) return res;
     } catch (e) { }
 
-    // 2. Coba CorsProxy (Alternatif Cepat)
     try {
         const proxy1 = `https://corsproxy.io/?${encodeURIComponent(url)}`;
         const res = await fetch(proxy1, { ...options, signal: AbortSignal.timeout(timeoutMs) });
         if (res.ok) return res;
     } catch (e) { }
-
-    // 3. AllOrigins (Paling Lambat, jangan dipakai di cron kecuali kepepet)
-    // Saya hapus AllOrigins di cron agar proses tidak timeout. 
-    // Cron harus cepat. Kalau 2 cara di atas gagal, anggap saja gagal putaran ini, coba lagi nanti.
     
     return null;
 }
 
-// Notif Functions (Sama, tapi Fire & Forget)
+// Notif Discord (Wajib return Promise)
 async function sendDiscord(webhookUrl, title, chapter, cover) {
-    try {
-        const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
-        await fetch(webhookUrl, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                username: "Manga Bot", 
-                embeds: [{ 
-                    title: `${title} Update!`, description: `New: **${chapter}**`, color: 5763719, image: { url: safeCover } 
-                }] 
-            })
-        });
-    } catch (e) {}
+    const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
+    return fetch(webhookUrl, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+            username: "Rex4Red Bot", 
+            embeds: [{ 
+                title: `${title} Update!`, description: `New: **${chapter}**`, color: 5763719, image: { url: safeCover } 
+            }] 
+        })
+    });
 }
 
+// Notif Telegram (Wajib return Promise)
 async function sendTelegram(token, chatId, title, chapter, cover) {
-    try {
-        const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
-        const cleanChatId = chatId.toString().replace(/[^0-9-]/g, '');
-        const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
-        const text = `🚨 *${title}* Update!\n\n${chapter}\n[Cover](${safeCover})`;
-        await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`);
-    } catch (e) {}
+    const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
+    const cleanChatId = chatId.toString().replace(/[^0-9-]/g, '');
+    const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
+    const text = `🚨 *${title}* Update!\n\n${chapter}\n[Cover](${safeCover})`;
+    const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
+
+    return fetch(tgUrl);
 }
