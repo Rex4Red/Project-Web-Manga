@@ -6,49 +6,53 @@ export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
-    const startTime = Date.now();
-    
-    // --- 1. SETUP SUPABASE ---
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
-
-    if (!supabaseUrl || !supabaseKey) {
-        return NextResponse.json({ status: false, error: "Missing Env Variables" }, { status: 500 });
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseKey);
-    const logs = [];
-    let updatesFound = 0;
-
     try {
-        // --- 2. AMBIL DATA ---
-        const { data: bookmarks, error } = await supabase.from('bookmarks').select('*');
-        if (error) throw error;
-        if (!bookmarks || bookmarks.length === 0) return NextResponse.json({ message: "Tidak ada bookmark." });
+        const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+        const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
 
-        const userIds = [...new Set(bookmarks.map(b => b.user_id))];
-        const { data: settingsData } = await supabase.from('user_settings').select('*').in('user_id', userIds);
-
-        // --- 3. MULAI CEK ---
-        const BATCH_SIZE = 3; 
-        for (let i = 0; i < bookmarks.length; i += BATCH_SIZE) {
-            if ((Date.now() - startTime) > 55000) {
-                logs.push("⚠️ FORCE STOP: Waktu habis.");
-                break;
-            }
-
-            const batch = bookmarks.slice(i, i + BATCH_SIZE);
-            const results = await Promise.all(batch.map(item => checkMangaUpdate(item, supabase, settingsData)));
-
-            results.forEach(res => {
-                if (res) logs.push(res);
-                if (res && res.includes("✅ UPDATE")) updatesFound++;
-            });
-
-            if (i + BATCH_SIZE < bookmarks.length) await new Promise(r => setTimeout(r, 1000));
+        if (!supabaseUrl || !supabaseKey) {
+            return NextResponse.json({ status: false, error: "Env Error" }, { status: 500 });
         }
 
-        return NextResponse.json({ status: "Selesai", checked: bookmarks.length, updates: updatesFound, logs });
+        const supabase = createClient(supabaseUrl, supabaseKey);
+
+        // 🔥 STRATEGI ANTRIAN (QUEUE) 🔥
+        // 1. Ambil 8 bookmark yang PALING LAMA tidak dicek (last_checked paling tua)
+        // nullsFirst: Bookmark baru yang belum pernah dicek akan diprioritaskan
+        const { data: queueBatch, error } = await supabase
+            .from('bookmarks')
+            .select('*')
+            .order('last_checked', { ascending: true, nullsFirst: true })
+            .limit(8); 
+
+        if (error) throw error;
+        if (!queueBatch || queueBatch.length === 0) return NextResponse.json({ message: "Bookmark kosong." });
+
+        // 2. Siapkan User Settings
+        const userIds = [...new Set(queueBatch.map(b => b.user_id))];
+        const { data: settingsData } = await supabase.from('user_settings').select('*').in('user_id', userIds);
+
+        // 3. PROSES PENGECEKAN (PARALEL CEPAT)
+        const results = await Promise.all(queueBatch.map(item => checkMangaUpdate(item, supabase, settingsData)));
+
+        // 4. 🔥 WAJIB: UPDATE STEMPEL WAKTU (Agar mereka antri ke belakang) 🔥
+        const checkedIds = queueBatch.map(b => b.id);
+        await supabase
+            .from('bookmarks')
+            .update({ last_checked: new Date().toISOString() })
+            .in('id', checkedIds);
+
+        // Filter log untuk output
+        const updatesFound = results.filter(r => r && r.includes("✅ UPDATE")).length;
+        const logs = results.filter(r => r); 
+
+        return NextResponse.json({ 
+            status: "Sukses Antrian", 
+            checked_count: queueBatch.length,
+            updates_found: updatesFound, 
+            checked_titles: queueBatch.map(b => b.title),
+            logs 
+        });
 
     } catch (error) {
         return NextResponse.json({ status: false, error: error.message }, { status: 500 });
@@ -59,145 +63,113 @@ async function checkMangaUpdate(item, supabase, allSettings) {
     try {
         let latestChapter = "";
         const headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Referer": "https://google.com",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": item.source === 'shinigami' ? "https://shinigami.id/" : "https://komikindo.tv/",
         };
 
-        // --- SCRAPING ---
+        // --- 1. SCRAPING (FAST MODE) ---
         if (item.source === 'shinigami') {
-            const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers });
-            if (res.ok) {
+            // Gunakan API, timeout 8 detik saja (Jangan lama-lama)
+            const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers }, 8000);
+            if (res && res.ok) {
                 try {
                     const json = await res.json();
                     if (json.data?.latest_chapter_number) latestChapter = `Chapter ${json.data.latest_chapter_number}`;
-                } catch (e) { return `⚠️ [${item.title}] Gagal Parse JSON`; }
+                    else if (json.data?.chapters?.[0]) latestChapter = `Chapter ${json.data.chapters[0].chapter_number}`;
+                } catch (e) { return `⚠️ [${item.title}] JSON Error`; }
             }
         } 
         else if (item.source === 'komikindo') {
-            let cleanId = item.manga_id;
-            if (/^\d+-/.test(cleanId)) cleanId = cleanId.replace(/^\d+-/, '');
-            const targetUrl = `https://komikindo.tv/komik/${cleanId}/`; 
-            const res = await fetchSmart(targetUrl, { headers });
-            if (res.ok) {
+            let cleanId = item.manga_id.replace(/^\d+-/, '');
+            // Fetch HTML, timeout 10 detik
+            const res = await fetchSmart(`https://komikindo.tv/komik/${cleanId}/`, { headers }, 10000);
+            if (res && res.ok) {
                 const html = await res.text();
+                // Optimasi Cheerio: Jangan load full body jika chapter ada di atas
                 const $ = cheerio.load(html);
-                let rawText = $('#chapter_list .lchx a').first().text();       
-                if (!rawText) rawText = $('.chapter-list li:first-child a').text();
-                if (!rawText) rawText = $('#chapter_list li:first-child a').text(); 
+                let rawText = $('#chapter_list .lchx a').first().text() || $('.chapter-list li:first-child a').text();
                 if (rawText) latestChapter = rawText.replace("Bahasa Indonesia", "").trim();
             }
         }
 
-        // --- LOGIKA UPDATE ---
+        // --- 2. LOGIKA UPDATE ---
         if (latestChapter) {
-            const cleanOld = item.last_chapter ? item.last_chapter.replace(/[^0-9.]/g, '') : "0";
-            const cleanNew = latestChapter.replace(/[^0-9.]/g, '');
+            const cleanOld = item.last_chapter ? parseFloat(item.last_chapter.replace(/[^0-9.]/g, '')) : 0;
+            const cleanNew = parseFloat(latestChapter.replace(/[^0-9.]/g, ''));
             
-            if (cleanOld === cleanNew && item.last_chapter !== null) return `ℹ️ [${item.title}] SAMA`;
+            if (isNaN(cleanNew) || cleanNew <= cleanOld) return null; // Tidak ada update
 
+            // Update Chapter Baru di Database
             await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
 
+            // Kirim Notifikasi
             let notifLog = [];
-            const userSetting = allSettings.find(s => s.user_id === item.user_id);
+            const userSetting = allSettings ? allSettings.find(s => s.user_id === item.user_id) : null;
             
             if (userSetting) {
-                if (userSetting.discord_webhook && userSetting.discord_webhook.startsWith("http")) {
-                    const status = await sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover);
-                    notifLog.push(`DC: ${status}`);
+                // Jalankan notifikasi tanpa await (Fire & Forget) agar cron lebih cepat selesai
+                if (userSetting.discord_webhook) {
+                    sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover).then(() => {});
+                    notifLog.push("DC");
                 }
                 if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
-                    const status = await sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover);
-                    notifLog.push(`TG: ${status}`);
+                    sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover).then(() => {});
+                    notifLog.push("TG");
                 }
-            } else {
-                notifLog.push("No Settings");
             }
 
-            return `✅ UPDATE [${item.title}]: ${latestChapter} | ${notifLog.join(', ')}`;
+            return `✅ UPDATE [${item.title}]: ${latestChapter}`;
         }
         return null;
     } catch (e) {
-        return `❌ ERROR [${item.title}]: ${e.message}`;
+        return `❌ Err [${item.title}]`;
     }
 }
 
-async function fetchSmart(url, options = {}) {
+// --- FETCHER PINTAR & CEPAT ---
+async function fetchSmart(url, options = {}, timeoutMs = 8000) {
+    // 1. Coba Direct (Paling Cepat)
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(5000) });
         if (res.ok) return res;
     } catch (e) { }
+
+    // 2. Coba CorsProxy (Alternatif Cepat)
     try {
         const proxy1 = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-        const res = await fetch(proxy1, { ...options, signal: AbortSignal.timeout(8000) });
+        const res = await fetch(proxy1, { ...options, signal: AbortSignal.timeout(timeoutMs) });
         if (res.ok) return res;
     } catch (e) { }
-    try {
-        const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-        const res = await fetch(proxy2, { ...options, signal: AbortSignal.timeout(8000) });
-        return res; 
-    } catch (e) { throw new Error("Proxy fail"); }
+
+    // 3. AllOrigins (Paling Lambat, jangan dipakai di cron kecuali kepepet)
+    // Saya hapus AllOrigins di cron agar proses tidak timeout. 
+    // Cron harus cepat. Kalau 2 cara di atas gagal, anggap saja gagal putaran ini, coba lagi nanti.
+    
+    return null;
 }
 
+// Notif Functions (Sama, tapi Fire & Forget)
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     try {
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
         await fetch(webhookUrl, {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ username: "Manga Bot", embeds: [{ title: `${title} Update!`, description: `**${chapter}**`, color: 5763719, image: { url: safeCover } }] })
+            body: JSON.stringify({ 
+                username: "Manga Bot", 
+                embeds: [{ 
+                    title: `${title} Update!`, description: `New: **${chapter}**`, color: 5763719, image: { url: safeCover } 
+                }] 
+            })
         });
-        return "OK";
-    } catch (e) { return "Fail"; }
+    } catch (e) {}
 }
 
-// 🔥 FUNGSI TELEGRAM (VERSI REGEX GANAS) 🔥
-// 🔥 FUNGSI TELEGRAM (VERSI ANTI-BLOKIR / PROXY) 🔥
-// 🔥 FUNGSI TELEGRAM (VERSI TANK: ANTI-BLOKIR & ANTI-TIMEOUT) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     try {
-        // 1. BERSIHKAN TOKEN
-        const cleanToken = token ? token.toString().replace(/[^a-zA-Z0-9:-]/g, '') : "";
-        const cleanChatId = chatId ? chatId.toString().replace(/[^0-9-]/g, '') : "";
-
-        if (!cleanToken || !cleanChatId) return "Err: Data Kosong";
-
+        const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
+        const cleanChatId = chatId.toString().replace(/[^0-9-]/g, '');
         const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
-        const text = `🚨 *${title}* Update!\n\n${chapter}\n[Lihat Cover](${safeCover})`;
-
-        // URL Telegram Asli
-        const tgUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`;
-
-        // --- STRATEGI 1: DIRECT (Jalur Utama) ---
-        try {
-            const res = await fetch(tgUrl, { method: "POST" }); // POST terkadang lolos firewall
-            if (res.ok) return "OK (Direct)";
-        } catch (e) {
-            console.log("Direct fail, switching to proxy...");
-        }
-
-        // --- STRATEGI 2: CORSPROXY.IO (Jalur Cepat) ---
-        // Proxy ini biasanya jauh lebih ngebut daripada AllOrigins
-        try {
-            const proxy1 = `https://corsproxy.io/?${encodeURIComponent(tgUrl)}`;
-            const res1 = await fetch(proxy1, { signal: AbortSignal.timeout(8000) }); // Timeout 8 detik
-            if (res1.ok) return "OK (CorsProxy)";
-        } catch (e) {
-            console.log("CorsProxy fail, switching to backup...");
-        }
-
-        // --- STRATEGI 3: ALLORIGINS (Jalur Cadangan) ---
-        try {
-            const proxy2 = `https://api.allorigins.win/raw?url=${encodeURIComponent(tgUrl)}`;
-            const res2 = await fetch(proxy2, { signal: AbortSignal.timeout(10000) }); // Timeout 10 detik
-            if (res2.ok) return "OK (AllOrigins)";
-            
-            // Kalau sampai sini masih gagal, baca errornya
-            const errText = await res2.text();
-            return `Fail AllProxies: ${res2.status} - ${errText.substring(0, 30)}`;
-        } catch (e) {
-            return `Ex AllProxies: ${e.message}`;
-        }
-
-    } catch (e) {
-        return `Ex Fatal: ${e.message}`;
-    }
+        const text = `🚨 *${title}* Update!\n\n${chapter}\n[Cover](${safeCover})`;
+        await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${cleanChatId}&text=${encodeURIComponent(text)}&parse_mode=Markdown`);
+    } catch (e) {}
 }
