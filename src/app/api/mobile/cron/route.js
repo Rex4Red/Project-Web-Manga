@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from 'cheerio';
+import dns from 'node:dns'; // 🔥 1. IMPORT DNS
+
+// 🔥 2. PAKSA IPV4 (SOLUSI FETCH FAILED) 🔥
+// Ini mencegah Node.js mencoba IPv6 yang sering gagal di hosting gratisan
+try {
+    if (dns.setDefaultResultOrder) {
+        dns.setDefaultResultOrder('ipv4first');
+    }
+} catch (e) { console.log("DNS Mode: Default"); }
 
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
@@ -31,11 +40,10 @@ export async function GET(request) {
         // 3. PROSES CEK
         const results = await Promise.all(queueBatch.map(item => checkMangaUpdate(item, supabase, settingsData)));
 
-        // 4. UPDATE TIMESTAMP (Agar antri ke belakang)
+        // 4. UPDATE TIMESTAMP
         const checkedIds = queueBatch.map(b => b.id);
         await supabase.from('bookmarks').update({ last_checked: new Date().toISOString() }).in('id', checkedIds);
 
-        // Filter Logs
         const logs = results.filter(r => r); 
 
         return NextResponse.json({ 
@@ -84,7 +92,7 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             const cleanOld = item.last_chapter ? parseFloat(item.last_chapter.replace(/[^0-9.]/g, '')) : 0;
             const cleanNew = parseFloat(latestChapter.replace(/[^0-9.]/g, ''));
             
-            if (isNaN(cleanNew) || cleanNew <= cleanOld) return null; // Skip jika tidak ada update baru
+            if (isNaN(cleanNew) || cleanNew <= cleanOld) return null; 
 
             // Update DB
             await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
@@ -96,7 +104,6 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             if (userSetting) {
                 const promises = [];
 
-                // Discord
                 if (userSetting.discord_webhook) {
                     promises.push(
                         sendDiscord(userSetting.discord_webhook, item.title, latestChapter, item.cover)
@@ -105,12 +112,15 @@ async function checkMangaUpdate(item, supabase, allSettings) {
                     );
                 }
                 
-                // Telegram
                 if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
                     promises.push(
                         sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover)
                         .then(() => notifLog.push("TG_OK"))
-                        .catch((e) => notifLog.push(`TG_ERR: ${e.message}`)) // Cek Error Disini
+                        .catch((e) => {
+                            // Log error lebih detail untuk debugging
+                            const reason = e.cause ? e.cause.message : e.message;
+                            notifLog.push(`TG_ERR: ${reason}`);
+                        })
                     );
                 }
 
@@ -139,7 +149,7 @@ async function fetchSmart(url, options = {}, timeoutMs = 8000) {
     return null;
 }
 
-// 🔥 DISCORD (POST JSON) 🔥
+// Discord
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
     const res = await fetch(webhookUrl, {
@@ -147,52 +157,37 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
             username: "Rex4Red Bot", 
-            embeds: [{ 
-                title: `${title} Update!`, 
-                description: `New: **${chapter}**`, 
-                color: 5763719, 
-                thumbnail: { url: safeCover } 
-            }] 
+            embeds: [{ title: `${title} Update!`, description: `New: **${chapter}**`, color: 5763719, thumbnail: { url: safeCover } }] 
         })
     });
-    if (!res.ok) throw new Error(res.statusText);
+    if (!res.ok) throw new Error(`Status ${res.status}`);
 }
 
-// 🔥 TELEGRAM (HTML MODE + POST JSON) 🔥
+// 🔥 TELEGRAM (DENGAN FETCH BIASA + IPV4 FIX) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
-    
-    // Gunakan HTML Tag yang aman (bukan Markdown)
-    // <b>Tebal</b>, <i>Miring</i>, <a href="...">Link</a>
     const htmlText = `🚨 <b>${escapeHtml(title)}</b> Update!\n\n${chapter}\n<a href="${cover}">Lihat Cover</a>`;
 
-    const payload = {
-        chat_id: chatId,
-        text: htmlText,
-        parse_mode: "HTML", // KUNCI ANTI-GAGAL
-        disable_web_page_preview: false
-    };
-
-    const res = await fetch(`https://api.telegram.org/bot${cleanToken}/sendMessage`, {
+    const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+    
+    const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+            chat_id: chatId,
+            text: htmlText,
+            parse_mode: "HTML",
+            disable_web_page_preview: false
+        })
     });
 
     if (!res.ok) {
-        const errText = await res.text();
-        // Lempar error agar tertangkap di log
-        throw new Error(`${res.status} - ${errText}`);
+        const txt = await res.text();
+        throw new Error(`Telegram Refused: ${res.status} - ${txt}`);
     }
 }
 
-// Helper untuk membersihkan judul agar tidak merusak HTML
 function escapeHtml(text) {
     if (!text) return "";
-    return text
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
+    return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
