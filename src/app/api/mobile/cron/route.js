@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from 'cheerio';
-import dns from 'node:dns'; // 🔥 1. IMPORT DNS
+import dns from 'node:dns';
 
-// 🔥 2. PAKSA IPV4 (SOLUSI FETCH FAILED) 🔥
-// Ini mencegah Node.js mencoba IPv6 yang sering gagal di hosting gratisan
+// Tetap pertahankan DNS fix ini
 try {
-    if (dns.setDefaultResultOrder) {
-        dns.setDefaultResultOrder('ipv4first');
-    }
-} catch (e) { console.log("DNS Mode: Default"); }
+    if (dns.setDefaultResultOrder) dns.setDefaultResultOrder('ipv4first');
+} catch (e) {}
 
 export const maxDuration = 60; 
 export const dynamic = 'force-dynamic';
@@ -23,7 +20,6 @@ export async function GET(request) {
 
         const supabase = createClient(supabaseUrl, supabaseKey);
 
-        // 1. AMBIL ANTRIAN (8 Terlama)
         const { data: queueBatch, error } = await supabase
             .from('bookmarks')
             .select('*')
@@ -33,14 +29,11 @@ export async function GET(request) {
         if (error) throw error;
         if (!queueBatch || queueBatch.length === 0) return NextResponse.json({ message: "Bookmark kosong." });
 
-        // 2. FETCH SETTINGS
         const userIds = [...new Set(queueBatch.map(b => b.user_id))];
         const { data: settingsData } = await supabase.from('user_settings').select('*').in('user_id', userIds);
 
-        // 3. PROSES CEK
         const results = await Promise.all(queueBatch.map(item => checkMangaUpdate(item, supabase, settingsData)));
 
-        // 4. UPDATE TIMESTAMP
         const checkedIds = queueBatch.map(b => b.id);
         await supabase.from('bookmarks').update({ last_checked: new Date().toISOString() }).in('id', checkedIds);
 
@@ -65,7 +58,6 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             "Referer": item.source === 'shinigami' ? "https://shinigami.id/" : "https://komikindo.tv/",
         };
 
-        // --- SCRAPING ---
         if (item.source === 'shinigami') {
             const res = await fetchSmart(`https://api.sansekai.my.id/api/komik/detail?manga_id=${item.manga_id}`, { headers }, 8000);
             if (res && res.ok) {
@@ -87,17 +79,14 @@ async function checkMangaUpdate(item, supabase, allSettings) {
             }
         }
 
-        // --- LOGIKA UPDATE ---
         if (latestChapter) {
             const cleanOld = item.last_chapter ? parseFloat(item.last_chapter.replace(/[^0-9.]/g, '')) : 0;
             const cleanNew = parseFloat(latestChapter.replace(/[^0-9.]/g, ''));
             
             if (isNaN(cleanNew) || cleanNew <= cleanOld) return null; 
 
-            // Update DB
             await supabase.from('bookmarks').update({ last_chapter: latestChapter }).eq('id', item.id);
 
-            // 🔥 KIRIM NOTIFIKASI 🔥
             let notifLog = [];
             const userSetting = allSettings ? allSettings.find(s => s.user_id === item.user_id) : null;
             
@@ -115,12 +104,8 @@ async function checkMangaUpdate(item, supabase, allSettings) {
                 if (userSetting.telegram_bot_token && userSetting.telegram_chat_id) {
                     promises.push(
                         sendTelegram(userSetting.telegram_bot_token, userSetting.telegram_chat_id, item.title, latestChapter, item.cover)
-                        .then(() => notifLog.push("TG_OK"))
-                        .catch((e) => {
-                            // Log error lebih detail untuk debugging
-                            const reason = e.cause ? e.cause.message : e.message;
-                            notifLog.push(`TG_ERR: ${reason}`);
-                        })
+                        .then((msg) => notifLog.push(msg))
+                        .catch((e) => notifLog.push(`TG_ERR: ${e.message}`))
                     );
                 }
 
@@ -135,7 +120,6 @@ async function checkMangaUpdate(item, supabase, allSettings) {
     }
 }
 
-// --- NETWORK UTILS ---
 async function fetchSmart(url, options = {}, timeoutMs = 8000) {
     try {
         const res = await fetch(url, { ...options, next: { revalidate: 0 }, signal: AbortSignal.timeout(5000) });
@@ -149,7 +133,6 @@ async function fetchSmart(url, options = {}, timeoutMs = 8000) {
     return null;
 }
 
-// Discord
 async function sendDiscord(webhookUrl, title, chapter, cover) {
     const safeCover = (cover && cover.startsWith("http")) ? cover : "https://placehold.co/200x300.png";
     const res = await fetch(webhookUrl, {
@@ -163,27 +146,49 @@ async function sendDiscord(webhookUrl, title, chapter, cover) {
     if (!res.ok) throw new Error(`Status ${res.status}`);
 }
 
-// 🔥 TELEGRAM (DENGAN FETCH BIASA + IPV4 FIX) 🔥
+// 🔥 TELEGRAM (VERSI TANK: ANTI-BLOKIR & ANTI-DNS ERROR) 🔥
 async function sendTelegram(token, chatId, title, chapter, cover) {
     const cleanToken = token.toString().replace(/[^a-zA-Z0-9:-]/g, '');
     const htmlText = `🚨 <b>${escapeHtml(title)}</b> Update!\n\n${chapter}\n<a href="${cover}">Lihat Cover</a>`;
 
-    const url = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
-    
-    const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            chat_id: chatId,
-            text: htmlText,
-            parse_mode: "HTML",
-            disable_web_page_preview: false
-        })
-    });
+    // 1. URL Direct (Biasanya gagal di hosting ini, tapi kita coba dulu)
+    const directUrl = `https://api.telegram.org/bot${cleanToken}/sendMessage`;
+    const payload = {
+        chat_id: chatId,
+        text: htmlText,
+        parse_mode: "HTML",
+        disable_web_page_preview: false
+    };
 
-    if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Telegram Refused: ${res.status} - ${txt}`);
+    try {
+        const res = await fetch(directUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(5000) // Timeout cepat 5 detik
+        });
+        if (res.ok) return "TG_OK (Direct)";
+    } catch (e) {
+        console.log("Direct TG failed, trying proxy...");
+    }
+
+    // 2. URL Proxy (Jalur Penyelamat)
+    // Kita ubah ke GET request agar bisa ditumpangkan ke corsproxy.io
+    const proxyUrlBase = `https://api.telegram.org/bot${cleanToken}/sendMessage?chat_id=${chatId}&text=${encodeURIComponent(htmlText)}&parse_mode=HTML`;
+    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(proxyUrlBase)}`;
+
+    try {
+        const resProxy = await fetch(proxyUrl, { 
+            method: "GET", // Proxy biasanya lebih suka GET
+            signal: AbortSignal.timeout(10000) 
+        });
+        
+        if (resProxy.ok) return "TG_OK (Proxy)";
+        
+        const errText = await resProxy.text();
+        throw new Error(`Proxy Refused: ${resProxy.status} - ${errText.substring(0, 50)}`);
+    } catch (e) {
+        throw new Error(`All Fail: ${e.message}`);
     }
 }
 
